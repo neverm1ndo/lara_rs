@@ -1,0 +1,19 @@
+# Safe, non-secret defaults committed with the application.
+# Environment variables and LARA_CONFIG_FILE overlays have higher priority.
+
+[server]
+bind_address = "127.0.0.1:3000"
+
+[jwt]
+issuer = "lara"
+audience = "lara-api"
+ttl_seconds = 3600
+
+[mongodb]
+database = "lara"
+
+# Secrets and credential-bearing connection strings intentionally do not have
+# file defaults. Supply them through:
+#   LARA_JWT__SECRET
+#   LARA_MYSQL__URL
+#   LARA_MONGODB__URI
