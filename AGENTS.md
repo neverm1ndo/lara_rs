@@ -23,11 +23,16 @@ src/
 │   ├── application/        # Application services, use cases, internal DTOs
 │   ├── infrastructure/     # Repositories (port implementations), DB access, JWT generation/validation
 │   └── presentation/       # Axum handlers, endpoint routes, HTTP DTOs, and utoipa definitions
-└── user/                   # Bounded Context: User Management
-    ├── domain/             # User domain model, core business rules & entities
-    ├── application/        # User profile use cases & application logic
-    ├── infrastructure/     # User-specific repository implementations (SQL queries, etc.)
-    └── presentation/       # Axum handlers, routes, HTTP DTOs, and utoipa definitions for user domain
+├── user/                   # Bounded Context: User Management
+│   ├── domain/             # User domain model, core business rules & entities
+│   ├── application/        # User profile use cases & application logic
+│   ├── infrastructure/     # User-specific repository implementations (SQL queries, etc.)
+│   └── presentation/       # Axum handlers, routes, HTTP DTOs, and utoipa definitions for user domain
+└── configuration/          # Bounded Context: SAMP/open.mp Server Configuration Management
+    ├── domain/             # Configuration domain models, validation rules, value objects
+    ├── application/        # Use cases for parsing, editing, and saving config files (server.cfg, etc.)
+    ├── infrastructure/     # File system operations, IO providers, parsing implementations
+    └── presentation/       # Axum handlers, routes, and utoipa annotations for configuration
 ```
 
 ---

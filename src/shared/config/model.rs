@@ -1,4 +1,4 @@
-use std::{fmt, net::SocketAddr};
+use std::{fmt, net::SocketAddr, path::PathBuf};
 
 use serde::Deserialize;
 
@@ -29,6 +29,8 @@ pub struct AppConfig {
     pub jwt: JwtConfig,
     pub mysql: MySqlConfig,
     pub mongodb: MongoConfig,
+    pub game_server: GameServerConfig,
+    pub configuration: ConfigurationConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +57,33 @@ pub struct MongoConfig {
     pub database: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct GameServerConfig {
+    pub storage: FileStorageConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FileStorageConfig {
+    pub root: PathBuf,
+    pub max_tree_depth: usize,
+    pub max_tree_entries: usize,
+    pub max_stream_size_bytes: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigurationConfig {
+    pub files: ConfigurationFilesConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ConfigurationFilesConfig {
+    pub configurator_directory: PathBuf,
+    pub binary_extensions: Vec<String>,
+    pub binary_file_names: Vec<String>,
+    pub ignored_paths: Vec<PathBuf>,
+    pub fallback_encoding: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,6 +106,23 @@ mod tests {
             mongodb: MongoConfig {
                 uri: SecretString::new("mongodb://user:password@localhost/lara"),
                 database: "lara".into(),
+            },
+            game_server: GameServerConfig {
+                storage: FileStorageConfig {
+                    root: "D:/servers/openmp".into(),
+                    max_tree_depth: 32,
+                    max_tree_entries: 10_000,
+                    max_stream_size_bytes: 10 * 1024 * 1024,
+                },
+            },
+            configuration: ConfigurationConfig {
+                files: ConfigurationFilesConfig {
+                    configurator_directory: "scriptfiles/config".into(),
+                    binary_extensions: vec!["amx".into(), "dff".into(), "txd".into()],
+                    binary_file_names: vec!["omp-server".into(), "samp03svr".into()],
+                    ignored_paths: vec!["logs".into(), "scriptfiles/cache".into()],
+                    fallback_encoding: "windows-1251".into(),
+                },
             },
         };
 
@@ -101,6 +147,23 @@ mod tests {
             "mongodb": {
                 "uri": "mongodb://localhost:27017",
                 "database": "lara"
+            },
+            "game_server": {
+                "storage": {
+                    "root": "D:/servers/openmp",
+                    "max_tree_depth": 32,
+                    "max_tree_entries": 10000,
+                    "max_stream_size_bytes": 10485760
+                }
+            },
+            "configuration": {
+                "files": {
+                    "configurator_directory": "scriptfiles/config",
+                    "binary_extensions": ["amx", "dff", "txd"],
+                    "binary_file_names": ["omp-server", "samp03svr"],
+                    "ignored_paths": ["logs", "scriptfiles/cache"],
+                    "fallback_encoding": "windows-1251"
+                }
             }
         }))
         .unwrap();
@@ -110,5 +173,26 @@ mod tests {
         assert_eq!(config.jwt.ttl_seconds, 3_600);
         assert_eq!(config.mysql.url.expose_secret(), "mysql://localhost/lara");
         assert_eq!(config.mongodb.database, "lara");
+        assert_eq!(
+            config.game_server.storage.root,
+            PathBuf::from("D:/servers/openmp")
+        );
+        assert_eq!(config.game_server.storage.max_tree_entries, 10_000);
+        assert_eq!(
+            config.configuration.files.configurator_directory,
+            PathBuf::from("scriptfiles/config")
+        );
+        assert_eq!(
+            config.configuration.files.binary_extensions,
+            vec!["amx", "dff", "txd"]
+        );
+        assert_eq!(
+            config.configuration.files.binary_file_names,
+            vec!["omp-server", "samp03svr"]
+        );
+        assert_eq!(
+            config.configuration.files.ignored_paths,
+            vec![PathBuf::from("logs"), PathBuf::from("scriptfiles/cache")]
+        );
     }
 }

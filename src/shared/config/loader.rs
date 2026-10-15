@@ -1,4 +1,8 @@
-use std::{env, path::Path};
+use std::{
+    collections::HashSet,
+    env,
+    path::{Component, Path},
+};
 
 use ::config::{ConfigBuilder, Environment, File, Map, builder::DefaultState};
 
@@ -11,6 +15,12 @@ const DEFAULT_JWT_TTL_SECONDS: i64 = 3_600;
 const MIN_JWT_TTL_SECONDS: i64 = 60;
 const MAX_JWT_TTL_SECONDS: i64 = 86_400;
 const MIN_JWT_SECRET_BYTES: usize = 32;
+const MIN_TREE_DEPTH: u64 = 1;
+const MAX_TREE_DEPTH: u64 = 128;
+const MIN_TREE_ENTRIES: u64 = 1;
+const MAX_TREE_ENTRIES: u64 = 1_000_000;
+const MIN_STREAM_SIZE_BYTES: u64 = 1;
+const MAX_STREAM_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
 
 impl AppConfig {
     /// Loads configuration in ascending priority order:
@@ -43,6 +53,11 @@ impl AppConfig {
         require_nonempty("mysql.url", self.mysql.url.expose_secret())?;
         require_nonempty("mongodb.uri", self.mongodb.uri.expose_secret())?;
         require_nonempty("mongodb.database", &self.mongodb.database)?;
+        require_nonempty_path("game_server.storage.root", &self.game_server.storage.root)?;
+        require_relative_path(
+            "configuration.files.configurator_directory",
+            &self.configuration.files.configurator_directory,
+        )?;
 
         if self.jwt.secret.expose_secret().len() < MIN_JWT_SECRET_BYTES {
             return Err(ConfigError::JwtSecretTooShort {
@@ -51,6 +66,28 @@ impl AppConfig {
         }
 
         parse_jwt_ttl_seconds(&self.jwt.ttl_seconds.to_string())?;
+        require_range(
+            "game_server.storage.max_tree_depth",
+            self.game_server.storage.max_tree_depth as u64,
+            MIN_TREE_DEPTH,
+            MAX_TREE_DEPTH,
+        )?;
+        require_range(
+            "game_server.storage.max_tree_entries",
+            self.game_server.storage.max_tree_entries as u64,
+            MIN_TREE_ENTRIES,
+            MAX_TREE_ENTRIES,
+        )?;
+        require_range(
+            "game_server.storage.max_stream_size_bytes",
+            self.game_server.storage.max_stream_size_bytes,
+            MIN_STREAM_SIZE_BYTES,
+            MAX_STREAM_SIZE_BYTES,
+        )?;
+        validate_binary_extensions(&self.configuration.files.binary_extensions)?;
+        validate_binary_file_names(&self.configuration.files.binary_file_names)?;
+        validate_ignored_paths(&self.configuration.files.ignored_paths)?;
+        validate_text_encoding(&self.configuration.files.fallback_encoding)?;
         Ok(())
     }
 }
@@ -62,6 +99,9 @@ fn log_loaded_configuration(config: &AppConfig) {
         jwt_audience = %config.jwt.audience,
         jwt_ttl_seconds = config.jwt.ttl_seconds,
         mongodb_database = %config.mongodb.database,
+        file_storage_max_tree_depth = config.game_server.storage.max_tree_depth,
+        file_storage_max_tree_entries = config.game_server.storage.max_tree_entries,
+        file_storage_max_stream_size_bytes = config.game_server.storage.max_stream_size_bytes,
         "server configuration loaded"
     );
 }
@@ -71,6 +111,10 @@ fn lara_environment(source: Option<Map<String, String>>) -> Environment {
         .prefix_separator("_")
         .separator("__")
         .try_parsing(true)
+        .list_separator(",")
+        .with_list_parse_key("configuration.files.binary_extensions")
+        .with_list_parse_key("configuration.files.binary_file_names")
+        .with_list_parse_key("configuration.files.ignored_paths")
         .ignore_empty(true)
         .source(source)
 }
@@ -188,6 +232,117 @@ fn require_nonempty(key: &'static str, value: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn require_nonempty_path(key: &'static str, value: &Path) -> Result<(), ConfigError> {
+    if value.as_os_str().is_empty() {
+        return Err(ConfigError::EmptyValue { key });
+    }
+
+    Ok(())
+}
+
+fn require_relative_path(key: &'static str, value: &Path) -> Result<(), ConfigError> {
+    if value.as_os_str().is_empty()
+        || value.is_absolute()
+        || !value
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(ConfigError::InvalidRelativePath { key });
+    }
+
+    Ok(())
+}
+
+fn require_range(
+    key: &'static str,
+    value: u64,
+    minimum: u64,
+    maximum: u64,
+) -> Result<(), ConfigError> {
+    if !(minimum..=maximum).contains(&value) {
+        return Err(ConfigError::ValueOutOfRange {
+            key,
+            minimum,
+            maximum,
+        });
+    }
+
+    Ok(())
+}
+
+fn validate_binary_extensions(extensions: &[String]) -> Result<(), ConfigError> {
+    let mut unique = HashSet::with_capacity(extensions.len());
+
+    for extension in extensions {
+        if extension.is_empty()
+            || !extension
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        {
+            return Err(ConfigError::InvalidFileExtension {
+                extension: extension.clone(),
+            });
+        }
+
+        if !unique.insert(extension.as_str()) {
+            return Err(ConfigError::DuplicateFileExtension {
+                extension: extension.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_binary_file_names(names: &[String]) -> Result<(), ConfigError> {
+    let mut unique = HashSet::with_capacity(names.len());
+
+    for name in names {
+        let normalized = name.to_ascii_lowercase();
+        if name.is_empty()
+            || name.trim() != name
+            || name == "."
+            || name == ".."
+            || name.contains(['/', '\\', ':'])
+        {
+            return Err(ConfigError::InvalidFileName { name: name.clone() });
+        }
+
+        if !unique.insert(normalized) {
+            return Err(ConfigError::DuplicateFileName { name: name.clone() });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_ignored_paths(paths: &[std::path::PathBuf]) -> Result<(), ConfigError> {
+    let mut unique = HashSet::with_capacity(paths.len());
+
+    for path in paths {
+        require_relative_path("configuration.files.ignored_paths", path)?;
+        let normalized = path.to_string_lossy().to_ascii_lowercase();
+
+        if !unique.insert(normalized.clone()) {
+            return Err(ConfigError::DuplicateIgnoredPath { path: normalized });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_text_encoding(encoding: &str) -> Result<(), ConfigError> {
+    require_nonempty("configuration.files.fallback_encoding", encoding)?;
+
+    if encoding_rs::Encoding::for_label(encoding.as_bytes()).is_none() {
+        return Err(ConfigError::UnsupportedTextEncoding {
+            encoding: encoding.to_owned(),
+        });
+    }
+
+    Ok(())
+}
+
 fn parse_jwt_ttl_seconds(value: &str) -> Result<i64, ConfigError> {
     let seconds = value
         .parse::<i64>()
@@ -224,6 +379,23 @@ mod tests {
             mongodb: super::super::model::MongoConfig {
                 uri: super::super::model::SecretString::new("mongodb://localhost:27017"),
                 database: "lara".into(),
+            },
+            game_server: super::super::model::GameServerConfig {
+                storage: super::super::model::FileStorageConfig {
+                    root: "D:/servers/openmp".into(),
+                    max_tree_depth: 32,
+                    max_tree_entries: 10_000,
+                    max_stream_size_bytes: 10 * 1024 * 1024,
+                },
+            },
+            configuration: super::super::model::ConfigurationConfig {
+                files: super::super::model::ConfigurationFilesConfig {
+                    configurator_directory: "scriptfiles/config".into(),
+                    binary_extensions: vec!["amx".into(), "dff".into(), "txd".into()],
+                    binary_file_names: vec!["omp-server".into(), "samp03svr".into()],
+                    ignored_paths: vec!["logs".into()],
+                    fallback_encoding: "windows-1251".into(),
+                },
             },
         }
     }
@@ -274,6 +446,10 @@ mod tests {
                 "mongodb.database",
                 Box::new(|config| config.mongodb.database = "".into()),
             ),
+            (
+                "game_server.storage.root",
+                Box::new(|config| config.game_server.storage.root = "".into()),
+            ),
         ];
 
         for (key, mutate) in cases.drain(..) {
@@ -304,6 +480,97 @@ mod tests {
         config.jwt.ttl_seconds = 59;
 
         assert!(matches!(config.validate(), Err(ConfigError::InvalidJwtTtl)));
+    }
+
+    #[test]
+    fn rejects_invalid_file_storage_limits() {
+        let cases: Vec<(&str, ConfigMutation)> = vec![
+            (
+                "game_server.storage.max_tree_depth",
+                Box::new(|config| config.game_server.storage.max_tree_depth = 0),
+            ),
+            (
+                "game_server.storage.max_tree_entries",
+                Box::new(|config| config.game_server.storage.max_tree_entries = 1_000_001),
+            ),
+            (
+                "game_server.storage.max_stream_size_bytes",
+                Box::new(|config| config.game_server.storage.max_stream_size_bytes = 0),
+            ),
+        ];
+
+        for (key, mutate) in cases {
+            let mut config = valid_config();
+            mutate(&mut config);
+
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::ValueOutOfRange { key: invalid_key, .. }) if invalid_key == key
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_configurator_directory() {
+        for path in ["", ".", "../config", "scriptfiles/../config"] {
+            let mut config = valid_config();
+            config.configuration.files.configurator_directory = path.into();
+
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidRelativePath {
+                    key: "configuration.files.configurator_directory"
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn validates_binary_file_rules_and_text_encoding() {
+        for extensions in [
+            vec![".cfg".into()],
+            vec!["CFG".into()],
+            vec!["amx".into(), "amx".into()],
+        ] {
+            let mut config = valid_config();
+            config.configuration.files.binary_extensions = extensions;
+            assert!(config.validate().is_err());
+        }
+
+        let mut no_binary_extensions = valid_config();
+        no_binary_extensions
+            .configuration
+            .files
+            .binary_extensions
+            .clear();
+        no_binary_extensions.validate().unwrap();
+
+        for names in [
+            vec!["../omp-server".into()],
+            vec!["plugins/server".into()],
+            vec!["omp-server".into(), "OMP-SERVER".into()],
+        ] {
+            let mut config = valid_config();
+            config.configuration.files.binary_file_names = names;
+            assert!(config.validate().is_err());
+        }
+
+        for paths in [vec!["../logs".into()], vec!["logs".into(), "LOGS".into()]] {
+            let mut config = valid_config();
+            config.configuration.files.ignored_paths = paths;
+            assert!(config.validate().is_err());
+        }
+
+        let mut unsupported_encoding = valid_config();
+        unsupported_encoding.configuration.files.fallback_encoding = "not-a-real-encoding".into();
+        assert!(matches!(
+            unsupported_encoding.validate(),
+            Err(ConfigError::UnsupportedTextEncoding { .. })
+        ));
+
+        let mut valid_encoding = valid_config();
+        valid_encoding.configuration.files.fallback_encoding = "utf-8".into();
+        valid_encoding.validate().unwrap();
     }
 
     #[test]
@@ -424,6 +691,19 @@ mod tests {
             [mongodb]
             uri = "mongodb://localhost:27017"
             database = "lara"
+
+            [game_server.storage]
+            root = "D:/servers/openmp"
+            max_tree_depth = 32
+            max_tree_entries = 10000
+            max_stream_size_bytes = 10485760
+
+            [configuration.files]
+            configurator_directory = "scriptfiles/config"
+            binary_extensions = ["amx", "dff", "txd"]
+            binary_file_names = ["omp-server", "samp03svr"]
+            ignored_paths = ["logs"]
+            fallback_encoding = "windows-1251"
         "#;
         let environment = Map::from([
             ("LARA_SERVER__BIND_ADDRESS".into(), "0.0.0.0:8080".into()),
@@ -432,6 +712,22 @@ mod tests {
                 "environment-secret-with-32-bytes!".into(),
             ),
             ("LARA_JWT__TTL_SECONDS".into(), "7200".into()),
+            (
+                "LARA_GAME_SERVER__STORAGE__MAX_TREE_DEPTH".into(),
+                "64".into(),
+            ),
+            (
+                "LARA_CONFIGURATION__FILES__BINARY_EXTENSIONS".into(),
+                "amx,dff,txd,so".into(),
+            ),
+            (
+                "LARA_CONFIGURATION__FILES__BINARY_FILE_NAMES".into(),
+                "omp-server,samp03svr".into(),
+            ),
+            (
+                "LARA_CONFIGURATION__FILES__IGNORED_PATHS".into(),
+                "logs,scriptfiles/cache".into(),
+            ),
         ]);
 
         let config = ::config::Config::builder()
@@ -450,6 +746,22 @@ mod tests {
             "environment-secret-with-32-bytes!"
         );
         assert_eq!(config.jwt.ttl_seconds, 7_200);
+        assert_eq!(config.game_server.storage.max_tree_depth, 64);
+        assert_eq!(
+            config.configuration.files.binary_extensions,
+            vec!["amx", "dff", "txd", "so"]
+        );
+        assert_eq!(
+            config.configuration.files.binary_file_names,
+            vec!["omp-server", "samp03svr"]
+        );
+        assert_eq!(
+            config.configuration.files.ignored_paths,
+            vec![
+                std::path::PathBuf::from("logs"),
+                std::path::PathBuf::from("scriptfiles/cache")
+            ]
+        );
         assert_eq!(config.mysql.url.expose_secret(), "mysql://localhost/file");
     }
 

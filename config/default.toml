@@ -12,6 +12,31 @@ ttl_seconds = 3600
 [mongodb]
 database = "lara"
 
+# Root of the managed SAMP/open.mp installation. Relative paths are resolved
+# from the server process working directory. Production deployments should
+# override this with an absolute path.
+[game_server.storage]
+root = "./game-server"
+max_tree_depth = 32
+max_tree_entries = 10000
+max_stream_size_bytes = 10485760
+
+[configuration.files]
+configurator_directory = "scriptfiles/config"
+binary_extensions = [
+    "amx",
+    "dff",
+    "dll",
+    "exe",
+    "so",
+    "txd",
+]
+binary_file_names = ["omp-server", "samp03svr"]
+# Relative paths whose complete subtrees are omitted from listings and cannot
+# be accessed through the configuration context.
+ignored_paths = []
+fallback_encoding = "windows-1251"
+
 # Secrets and credential-bearing connection strings intentionally do not have
 # file defaults. Supply them through:
 #   LARA_JWT__SECRET
