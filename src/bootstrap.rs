@@ -18,7 +18,7 @@ use crate::{
             session_repository::MongoSessionRepository,
         },
     },
-    shared::config::AppConfig,
+    shared::{config::AppConfig, file_storage::path::RelativeStoragePath},
     user::infrastructure::{
         authenticated_user_repository::SeaOrmAuthenticatedUserRepository,
         login_user_repository::SeaOrmLoginUserRepository,
@@ -38,6 +38,8 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
 }
 
 async fn build_router(config: AppConfig) -> Result<Router, BootstrapError> {
+    let configurator_directory =
+        RelativeStoragePath::try_from(config.configuration.files.configurator_directory.as_path())?;
     let mysql = Database::connect(config.mysql.url.expose_secret()).await?;
     let mongo = Client::with_uri_str(config.mongodb.uri.expose_secret()).await?;
     let mongo_database = mongo.database(&config.mongodb.database);
@@ -69,7 +71,7 @@ async fn build_router(config: AppConfig) -> Result<Router, BootstrapError> {
         config.jwt.audience,
         config.jwt.ttl_seconds,
     )?;
-    let state = AppState::new(authenticator, login_service);
+    let state = AppState::new(authenticator, login_service, configurator_directory);
 
     let (router, openapi) =
         OpenApiRouter::<AppState>::with_openapi(auth::presentation::openapi_document())
