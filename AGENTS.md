@@ -28,11 +28,21 @@ src/
 │   ├── application/        # User profile use cases & application logic
 │   ├── infrastructure/     # User-specific repository implementations (SQL queries, etc.)
 │   └── presentation/       # Axum handlers, routes, HTTP DTOs, and utoipa definitions for user domain
-└── configuration/          # Bounded Context: SAMP/open.mp Server Configuration Management
-    ├── domain/             # Configuration domain models, validation rules, value objects
-    ├── application/        # Use cases for parsing, editing, and saving config files (server.cfg, etc.)
-    ├── infrastructure/     # File system operations, IO providers, parsing implementations
-    └── presentation/       # Axum handlers, routes, and utoipa annotations for configuration
+├── configuration/          # Bounded Context: SAMP/open.mp Server Configuration Management
+│   ├── domain/             # Configuration domain models, validation rules, value objects
+│   ├── application/        # Use cases for parsing, editing, and saving config files (server.cfg, etc.)
+│   ├── infrastructure/     # File system operations, IO providers, parsing implementations
+│   └── presentation/       # Axum handlers, routes, and utoipa annotations for configuration
+├── maps/                   # Bounded Context: Server Mapping Management (XML files)
+│   ├── domain/             # Map domain models & business rules
+│   ├── application/        # Use cases for map processing and CRUD operations
+│   ├── infrastructure/     # Uses shared/file_storage for XML file management
+│   └── presentation/       # Axum handlers, routes, and utoipa annotations for maps
+└── backups/                # Bounded Context: Versioning & Snapshot Management
+    ├── domain/             # Backup retention policy, snapshot metadata models
+    ├── application/        # Use cases for listing, restoring, and managing historical snapshots
+    ├── infrastructure/     # File system snapshot storage, pre-calculated diff/patch generation
+    └── presentation/       # Axum handlers, routes, and utoipa annotations for backups
 ```
 
 ---
@@ -48,6 +58,9 @@ src/
    * `application` depends only on `domain`.
    * `infrastructure` and `presentation` depend on `application` and `domain`.
 3. **Cross-Domain Interaction:** If `user` requires data or verification from `auth` (or vice versa), interaction must occur via traits/interfaces in the `domain`/`application` layer or well-defined contracts. Directly querying or accessing another domain's infrastructure or database tables is strictly forbidden.
+
+### File System Operations & DRY
+* Lower-level file interactions (directory traversal for file trees, secure path checking, and multipart uploads) must not be duplicated across domains. They must leverage **`shared::file_storage`** within their infrastructure layers.
 
 ---
 
