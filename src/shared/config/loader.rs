@@ -1,12 +1,9 @@
-use std::{
-    collections::HashSet,
-    env,
-    path::{Component, Path},
-};
+use std::{collections::HashSet, env, path::Path};
 
 use ::config::{ConfigBuilder, Environment, File, Map, builder::DefaultState};
 
 use super::{AppConfig, ConfigError};
+use crate::shared::file_storage::path::{RelativeStoragePath, StorageFileName};
 
 const DEFAULT_CONFIG_FILE: &str = "config/default.toml";
 const CONFIG_FILE_ENV: &str = "LARA_CONFIG_FILE";
@@ -241,16 +238,9 @@ fn require_nonempty_path(key: &'static str, value: &Path) -> Result<(), ConfigEr
 }
 
 fn require_relative_path(key: &'static str, value: &Path) -> Result<(), ConfigError> {
-    if value.as_os_str().is_empty()
-        || value.is_absolute()
-        || !value
-            .components()
-            .all(|component| matches!(component, Component::Normal(_)))
-    {
-        return Err(ConfigError::InvalidRelativePath { key });
-    }
-
-    Ok(())
+    RelativeStoragePath::try_from(value)
+        .map(|_| ())
+        .map_err(|_| ConfigError::InvalidRelativePath { key })
 }
 
 fn require_range(
@@ -299,12 +289,7 @@ fn validate_binary_file_names(names: &[String]) -> Result<(), ConfigError> {
 
     for name in names {
         let normalized = name.to_ascii_lowercase();
-        if name.is_empty()
-            || name.trim() != name
-            || name == "."
-            || name == ".."
-            || name.contains(['/', '\\', ':'])
-        {
+        if StorageFileName::new(name).is_err() {
             return Err(ConfigError::InvalidFileName { name: name.clone() });
         }
 
