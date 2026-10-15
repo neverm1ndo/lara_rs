@@ -25,6 +25,7 @@ socketioxide = "0.18.7"
 subtle = "2.6.1"
 thiserror = "2.0.21"
 tokio = "1.53.2"
+tokio-util = { version = "0.7.20", features = ["io"] }
 tower = "0.5.3"
 tower-http = "0.7.1"
 tower_governor = "0.8.0"
