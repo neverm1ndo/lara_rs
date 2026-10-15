@@ -241,6 +241,8 @@ pub enum InvalidMutationPermit {
     StaleRevision,
     #[error("backup receipt belongs to another mutation")]
     ReceiptMutationMismatch,
+    #[error("mutation permit belongs to another mutation")]
+    PermitMutationMismatch,
     #[error("backup receipt belongs to another file revision")]
     ReceiptRevisionMismatch,
     #[error("a required backup receipt is missing")]

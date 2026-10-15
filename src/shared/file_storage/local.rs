@@ -6,7 +6,7 @@ use std::{
 
 use thiserror::Error;
 
-use super::path::RelativeStoragePath;
+use super::{mutation::FileRevision, path::RelativeStoragePath};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileStorageLimits {
@@ -99,6 +99,127 @@ impl LocalFileStorage {
         })
     }
 
+    pub(super) async fn file_revision(
+        &self,
+        path: &RelativeStoragePath,
+    ) -> Result<FileRevision, LocalFileStorageError> {
+        let target = self.resolve_existing_file(path).await?;
+        let metadata = tokio::fs::metadata(target).await?;
+        let modified_at = metadata.modified()?.into();
+        Ok(FileRevision::from_metadata(metadata.len(), modified_at))
+    }
+
+    pub(super) async fn ensure_absent(
+        &self,
+        path: &RelativeStoragePath,
+    ) -> Result<(), LocalFileStorageError> {
+        let target = self.resolve_new_file(path).await?;
+        match tokio::fs::symlink_metadata(target).await {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.into()),
+            Ok(_) => Err(LocalFileStorageError::AlreadyExists),
+        }
+    }
+
+    pub(super) async fn create_file(
+        &self,
+        path: &RelativeStoragePath,
+        content: &[u8],
+    ) -> Result<(), LocalFileStorageError> {
+        let target = self.resolve_new_file(path).await?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        let mut file = options.open(target).await?;
+        use tokio::io::AsyncWriteExt;
+        file.write_all(content).await?;
+        file.flush().await?;
+        Ok(())
+    }
+
+    pub(super) async fn overwrite_file(
+        &self,
+        path: &RelativeStoragePath,
+        content: &[u8],
+    ) -> Result<(), LocalFileStorageError> {
+        let target = self.resolve_existing_file(path).await?;
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).truncate(true);
+        let mut file = options.open(target).await?;
+        use tokio::io::AsyncWriteExt;
+        file.write_all(content).await?;
+        file.flush().await?;
+        Ok(())
+    }
+
+    pub(super) async fn delete_file(
+        &self,
+        path: &RelativeStoragePath,
+    ) -> Result<(), LocalFileStorageError> {
+        let target = self.resolve_existing_file(path).await?;
+        tokio::fs::remove_file(target).await?;
+        Ok(())
+    }
+
+    pub(super) async fn rename_file(
+        &self,
+        source: &RelativeStoragePath,
+        destination: &RelativeStoragePath,
+    ) -> Result<(), LocalFileStorageError> {
+        let source = self.resolve_existing_file(source).await?;
+        let destination = self.resolve_new_file(destination).await?;
+        match tokio::fs::symlink_metadata(&destination).await {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+            Ok(_) => return Err(LocalFileStorageError::AlreadyExists),
+        }
+        tokio::fs::rename(source, destination).await?;
+        Ok(())
+    }
+
+    async fn resolve_existing_file(
+        &self,
+        path: &RelativeStoragePath,
+    ) -> Result<PathBuf, LocalFileStorageError> {
+        let target = self.resolve_new_file(path).await?;
+        let metadata = tokio::fs::symlink_metadata(&target).await?;
+        if is_link_or_reparse_point(&metadata) {
+            return Err(LocalFileStorageError::LinkOrReparsePoint);
+        }
+        if !metadata.is_file() {
+            return Err(LocalFileStorageError::NotFile);
+        }
+        Ok(target)
+    }
+
+    async fn resolve_new_file(
+        &self,
+        path: &RelativeStoragePath,
+    ) -> Result<PathBuf, LocalFileStorageError> {
+        if path.is_root() {
+            return Err(LocalFileStorageError::RootFile);
+        }
+
+        let parent = path.parent().expect("non-root path has a parent");
+        let mut resolved_parent = self.root.as_ref().clone();
+        for component in parent.components() {
+            resolved_parent.push(component);
+            let metadata = tokio::fs::symlink_metadata(&resolved_parent).await?;
+            if is_link_or_reparse_point(&metadata) {
+                return Err(LocalFileStorageError::LinkOrReparsePoint);
+            }
+            if !metadata.is_dir() {
+                return Err(LocalFileStorageError::NotDirectory);
+            }
+        }
+
+        let canonical_parent = tokio::fs::canonicalize(&resolved_parent).await?;
+        if !canonical_parent.starts_with(self.root.as_ref()) {
+            return Err(LocalFileStorageError::OutsideRoot);
+        }
+
+        Ok(canonical_parent.join(path.file_name().expect("non-root path has a name")))
+    }
+
     #[cfg(test)]
     fn root_path(&self) -> &Path {
         self.root.as_path()
@@ -136,6 +257,12 @@ pub enum LocalFileStorageError {
     InvalidLimits,
     #[error("file-storage root or scope is not a directory")]
     NotDirectory,
+    #[error("file-storage path is not a regular file")]
+    NotFile,
+    #[error("the file-storage capability root cannot be used as a file")]
+    RootFile,
+    #[error("the destination already exists")]
+    AlreadyExists,
     #[error("file-storage root or scope must not be a symbolic link or reparse point")]
     LinkOrReparsePoint,
     #[error("file-storage scope resolves outside its capability root")]
