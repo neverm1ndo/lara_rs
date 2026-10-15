@@ -270,6 +270,7 @@ struct TestState {
     service: Arc<dyn ConfigurationFileService>,
     configurator_directory: RelativeStoragePath,
     encoding: &'static Encoding,
+    upload_limit_bytes: u64,
 }
 
 impl JwtExtractorState for TestState {
@@ -291,6 +292,10 @@ impl ConfigurationState for TestState {
 
     fn configuration_file_encoding(&self) -> &'static Encoding {
         self.encoding
+    }
+
+    fn configuration_file_upload_limit_bytes(&self) -> u64 {
+        self.upload_limit_bytes
     }
 }
 
@@ -322,6 +327,7 @@ fn app_with_service_and_encoding(
         service,
         configurator_directory: RelativeStoragePath::new("scriptfiles/config").unwrap(),
         encoding,
+        upload_limit_bytes: 10 * 1024 * 1024,
     };
     router::<TestState>().with_state(state).split_for_parts().0
 }

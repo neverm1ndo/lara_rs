@@ -40,6 +40,10 @@ TOML, а секреты и точечные переопределения пе�
 | `configuration.files.binary_file_names` | `LARA_CONFIGURATION__FILES__BINARY_FILE_NAMES` |
 | `configuration.files.ignored_paths` | `LARA_CONFIGURATION__FILES__IGNORED_PATHS` |
 | `configuration.files.fallback_encoding` | `LARA_CONFIGURATION__FILES__FALLBACK_ENCODING` |
+| `maps.files.directory` | `LARA_MAPS__FILES__DIRECTORY` |
+| `maps.upload.max_files_per_request` | `LARA_MAPS__UPLOAD__MAX_FILES_PER_REQUEST` |
+| `maps.upload.max_file_size_bytes` | `LARA_MAPS__UPLOAD__MAX_FILE_SIZE_BYTES` |
+| `maps.upload.max_total_size_bytes` | `LARA_MAPS__UPLOAD__MAX_TOTAL_SIZE_BYTES` |
 
 Списки в переменных окружения задаются через запятую. Например,
 `LARA_CONFIGURATION__FILES__BINARY_EXTENSIONS=amx,dff,so,txd` и
@@ -82,6 +86,14 @@ binary_extensions = ["amx", "dff", "dll", "exe", "so", "txd"]
 binary_file_names = ["omp-server", "samp03svr"]
 ignored_paths = ["logs", "scriptfiles/cache"]
 fallback_encoding = "windows-1251"
+
+[maps.files]
+directory = "scriptfiles/maps"
+
+[maps.upload]
+max_files_per_request = 50
+max_file_size_bytes = 10485760
+max_total_size_bytes = 52428800
 ```
 
 `jwt.secret`, `mysql.url` и `mongodb.uri` рекомендуется передавать только
@@ -95,6 +107,12 @@ JWT TTL (60–86400 секунд), минимальную длину HS256-се�
 файлового хранилища, относительные пути, расширения и имена бинарных файлов,
 исключённые ветки дерева и fallback-кодировку. Секреты скрываются в
 `Debug`-выводе.
+
+Каталог `maps.files.directory` задаётся относительно
+`game_server.storage.root`. Лимит одного файла карты не может превышать
+`game_server.storage.max_stream_size_bytes`, а суммарный лимит одной
+мультизагрузки должен быть не меньше лимита отдельного файла. Допустимо от 1 до
+1000 файлов в одном запросе; максимальный суммарный размер ограничен 1 ГиБ.
 
 Все файлы, не совпавшие с `binary_extensions` или `binary_file_names`,
 считаются потенциально текстовыми. Пути из `ignored_paths` вместе со всем их

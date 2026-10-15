@@ -37,6 +37,17 @@ binary_file_names = ["omp-server", "samp03svr"]
 ignored_paths = []
 fallback_encoding = "windows-1251"
 
+# Root of the recursive map tree, relative to game_server.storage.root.
+[maps.files]
+directory = "scriptfiles/maps"
+
+# Multipart batch-upload limits. Map contents are treated as opaque bytes and
+# are never decoded or parsed as XML by the backend.
+[maps.upload]
+max_files_per_request = 50
+max_file_size_bytes = 10485760
+max_total_size_bytes = 52428800
+
 # Secrets and credential-bearing connection strings intentionally do not have
 # file defaults. Supply them through:
 #   LARA_JWT__SECRET

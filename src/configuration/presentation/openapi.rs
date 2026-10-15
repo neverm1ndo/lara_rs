@@ -98,6 +98,10 @@ mod tests {
         fn configuration_file_encoding(&self) -> &'static encoding_rs::Encoding {
             encoding_rs::WINDOWS_1251
         }
+
+        fn configuration_file_upload_limit_bytes(&self) -> u64 {
+            10 * 1024 * 1024
+        }
     }
 
     fn document() -> utoipa::openapi::OpenApi {

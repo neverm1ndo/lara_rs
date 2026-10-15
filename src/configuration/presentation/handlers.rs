@@ -2,8 +2,7 @@ use axum::{
     Json,
     body::Body,
     extract::{
-        Multipart, Query,
-        multipart::{MultipartError, MultipartRejection},
+        Query, Request,
         rejection::{JsonRejection, QueryRejection},
     },
     http::{
@@ -27,7 +26,11 @@ use crate::{
         ConfigurationFileContent, ConfigurationFileServiceError, ConfigurationRequestContext,
         ConfigurationTextFile,
     },
-    shared::file_storage::{mutation::MutationActor, path::RelativeStoragePath},
+    shared::file_storage::{
+        mutation::MutationActor,
+        path::RelativeStoragePath,
+        upload::{MultipartUploadError, MultipartUploadLimits, collect_multipart_upload},
+    },
 };
 
 const TAG: &str = "Server configuration";
@@ -101,13 +104,17 @@ pub async fn read_file(
 )]
 pub async fn create_file(
     authorized: AuthorizedConfiguration,
-    ConfigurationServiceHandle { service, encoding }: ConfigurationServiceHandle,
+    ConfigurationServiceHandle {
+        service,
+        encoding,
+        upload_limit_bytes,
+    }: ConfigurationServiceHandle,
     query: Result<Query<FilePathQuery>, QueryRejection>,
-    multipart: Result<Multipart, MultipartRejection>,
+    request: Request,
 ) -> Result<impl IntoResponse, ConfigurationHttpError> {
     let Query(query) = query.map_err(|_| ConfigurationHttpError::BadRequest)?;
     let path = parse_path(&query.path)?;
-    let content = multipart_content(multipart, encoding).await?;
+    let content = multipart_content(request, encoding, upload_limit_bytes).await?;
     let event = service
         .create(request_context(authorized), path, content)
         .await?;
@@ -135,13 +142,17 @@ pub async fn create_file(
 )]
 pub async fn overwrite_file(
     authorized: AuthorizedConfiguration,
-    ConfigurationServiceHandle { service, encoding }: ConfigurationServiceHandle,
+    ConfigurationServiceHandle {
+        service,
+        encoding,
+        upload_limit_bytes,
+    }: ConfigurationServiceHandle,
     query: Result<Query<FilePathQuery>, QueryRejection>,
-    multipart: Result<Multipart, MultipartRejection>,
+    request: Request,
 ) -> Result<Json<FileMutationResponse>, ConfigurationHttpError> {
     let Query(query) = query.map_err(|_| ConfigurationHttpError::BadRequest)?;
     let path = parse_path(&query.path)?;
-    let content = multipart_content(multipart, encoding).await?;
+    let content = multipart_content(request, encoding, upload_limit_bytes).await?;
     let event = service
         .overwrite(request_context(authorized), path, content)
         .await?;
@@ -220,25 +231,27 @@ fn parse_path(value: &str) -> Result<RelativeStoragePath, ConfigurationHttpError
 }
 
 async fn multipart_content(
-    multipart: Result<Multipart, MultipartRejection>,
+    request: Request,
     encoding: &'static encoding_rs::Encoding,
+    upload_limit_bytes: u64,
 ) -> Result<ConfigurationFileContent, ConfigurationHttpError> {
-    let mut multipart = multipart.map_err(|_| ConfigurationHttpError::BadRequest)?;
-    let mut content = None;
-
-    while let Some(field) = multipart.next_field().await.map_err(map_multipart_error)? {
-        if field.name() != Some("file") || content.is_some() {
-            return Err(ConfigurationHttpError::BadRequest);
-        }
-        content = Some(field.bytes().await.map_err(map_multipart_error)?.to_vec());
+    let limits = MultipartUploadLimits::single_part(upload_limit_bytes)
+        .map_err(|_| ConfigurationHttpError::Unavailable)?;
+    let mut parts = collect_multipart_upload(request, limits)
+        .await
+        .map_err(map_multipart_upload_error)?
+        .into_parts();
+    let part = parts.pop().ok_or(ConfigurationHttpError::BadRequest)?;
+    if part.name() != "file" || !parts.is_empty() {
+        return Err(ConfigurationHttpError::BadRequest);
     }
 
-    let bytes = content.ok_or(ConfigurationHttpError::BadRequest)?;
+    let bytes = part.into_bytes();
     ConfigurationFileContent::validate(bytes, encoding).map_err(Into::into)
 }
 
-fn map_multipart_error(error: MultipartError) -> ConfigurationHttpError {
-    if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+fn map_multipart_upload_error(error: MultipartUploadError) -> ConfigurationHttpError {
+    if error.is_too_large() {
         ConfigurationHttpError::ContentTooLarge
     } else {
         ConfigurationHttpError::BadRequest

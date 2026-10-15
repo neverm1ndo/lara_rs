@@ -31,6 +31,7 @@ pub struct AppConfig {
     pub mongodb: MongoConfig,
     pub game_server: GameServerConfig,
     pub configuration: ConfigurationConfig,
+    pub maps: MapsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -84,6 +85,26 @@ pub struct ConfigurationFilesConfig {
     pub fallback_encoding: String,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct MapsConfig {
+    pub files: MapsFilesConfig,
+    pub upload: MapsUploadConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MapsFilesConfig {
+    /// Directory relative to `game_server.storage.root` that contains the map
+    /// tree managed by the maps bounded context.
+    pub directory: PathBuf,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MapsUploadConfig {
+    pub max_files_per_request: usize,
+    pub max_file_size_bytes: u64,
+    pub max_total_size_bytes: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,6 +143,16 @@ mod tests {
                     binary_file_names: vec!["omp-server".into(), "samp03svr".into()],
                     ignored_paths: vec!["logs".into(), "scriptfiles/cache".into()],
                     fallback_encoding: "windows-1251".into(),
+                },
+            },
+            maps: MapsConfig {
+                files: MapsFilesConfig {
+                    directory: "scriptfiles/maps".into(),
+                },
+                upload: MapsUploadConfig {
+                    max_files_per_request: 50,
+                    max_file_size_bytes: 10 * 1024 * 1024,
+                    max_total_size_bytes: 50 * 1024 * 1024,
                 },
             },
         };
@@ -164,6 +195,16 @@ mod tests {
                     "ignored_paths": ["logs", "scriptfiles/cache"],
                     "fallback_encoding": "windows-1251"
                 }
+            },
+            "maps": {
+                "files": {
+                    "directory": "scriptfiles/maps"
+                },
+                "upload": {
+                    "max_files_per_request": 50,
+                    "max_file_size_bytes": 10485760,
+                    "max_total_size_bytes": 52428800
+                }
             }
         }))
         .unwrap();
@@ -194,5 +235,12 @@ mod tests {
             config.configuration.files.ignored_paths,
             vec![PathBuf::from("logs"), PathBuf::from("scriptfiles/cache")]
         );
+        assert_eq!(
+            config.maps.files.directory,
+            PathBuf::from("scriptfiles/maps")
+        );
+        assert_eq!(config.maps.upload.max_files_per_request, 50);
+        assert_eq!(config.maps.upload.max_file_size_bytes, 10_485_760);
+        assert_eq!(config.maps.upload.max_total_size_bytes, 52_428_800);
     }
 }

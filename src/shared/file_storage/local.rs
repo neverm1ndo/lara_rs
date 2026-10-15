@@ -1,16 +1,72 @@
 use std::{
+    future::Future,
     io,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::Arc,
 };
 
+use chrono::{DateTime, Utc};
 use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncReadExt};
 
 use super::{
     guard::{FileSnapshot, FileSnapshotSource, ReadFileSnapshotError, ReadFileSnapshotFuture},
     mutation::FileRevision,
-    path::RelativeStoragePath,
+    path::{RelativeStoragePath, StorageFileName},
 };
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum StorageTreeEntryKind {
+    Directory,
+    File,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageTreeEntry {
+    path: RelativeStoragePath,
+    name: String,
+    kind: StorageTreeEntryKind,
+    size: Option<u64>,
+    modified_at: Option<DateTime<Utc>>,
+    children: Vec<StorageTreeEntry>,
+}
+
+impl StorageTreeEntry {
+    pub fn path(&self) -> &RelativeStoragePath {
+        &self.path
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn kind(&self) -> StorageTreeEntryKind {
+        self.kind
+    }
+
+    pub fn size(&self) -> Option<u64> {
+        self.size
+    }
+
+    pub fn modified_at(&self) -> Option<DateTime<Utc>> {
+        self.modified_at
+    }
+
+    pub fn children(&self) -> &[StorageTreeEntry] {
+        &self.children
+    }
+
+    pub fn into_children(self) -> Vec<StorageTreeEntry> {
+        self.children
+    }
+}
+
+pub struct OpenedStorageFile {
+    pub reader: Pin<Box<dyn AsyncRead + Send>>,
+    pub content_length: u64,
+    pub revision: FileRevision,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileStorageLimits {
@@ -100,6 +156,133 @@ impl LocalFileStorage {
         Ok(Self {
             root: Arc::new(canonical),
             limits: self.limits,
+        })
+    }
+
+    /// Builds a deterministic recursive tree inside this capability. Unsafe
+    /// names and link/reparse-point entries are omitted rather than followed.
+    pub async fn tree(&self) -> Result<Vec<StorageTreeEntry>, LocalFileStorageError> {
+        let mut entry_count = 0_usize;
+        self.read_tree_directory(
+            self.root.as_ref().clone(),
+            RelativeStoragePath::root(),
+            0,
+            &mut entry_count,
+        )
+        .await
+    }
+
+    /// Opens a regular file as an opaque, length-bounded byte stream.
+    pub async fn open_file(
+        &self,
+        path: &RelativeStoragePath,
+    ) -> Result<OpenedStorageFile, LocalFileStorageError> {
+        let target = self.resolve_existing_file(path).await?;
+        let file = tokio::fs::File::open(target).await?;
+        let metadata = file.metadata().await?;
+        if !metadata.is_file() {
+            return Err(LocalFileStorageError::NotFile);
+        }
+        if metadata.len() > self.limits.max_stream_size_bytes {
+            return Err(LocalFileStorageError::ContentTooLarge {
+                maximum: self.limits.max_stream_size_bytes,
+            });
+        }
+
+        let modified_at = metadata.modified()?.into();
+        let revision = FileRevision::from_metadata(metadata.len(), modified_at);
+        let content_length = metadata.len();
+        Ok(OpenedStorageFile {
+            reader: Box::pin(file.take(content_length)),
+            content_length,
+            revision,
+        })
+    }
+
+    fn read_tree_directory<'a>(
+        &'a self,
+        absolute_directory: PathBuf,
+        relative_directory: RelativeStoragePath,
+        depth: usize,
+        entry_count: &'a mut usize,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<Vec<StorageTreeEntry>, LocalFileStorageError>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            let mut directory = tokio::fs::read_dir(absolute_directory).await?;
+            let mut entries = Vec::new();
+
+            while let Some(entry) = directory.next_entry().await? {
+                let Some(raw_name) = entry.file_name().to_str().map(ToOwned::to_owned) else {
+                    continue;
+                };
+                let Ok(name) = StorageFileName::new(&raw_name) else {
+                    continue;
+                };
+                let metadata = tokio::fs::symlink_metadata(entry.path()).await?;
+                if is_link_or_reparse_point(&metadata) {
+                    continue;
+                }
+
+                let kind = if metadata.is_dir() {
+                    StorageTreeEntryKind::Directory
+                } else if metadata.is_file() {
+                    StorageTreeEntryKind::File
+                } else {
+                    continue;
+                };
+
+                if *entry_count >= self.limits.max_tree_entries {
+                    return Err(LocalFileStorageError::TreeEntryLimitExceeded {
+                        maximum: self.limits.max_tree_entries,
+                    });
+                }
+                *entry_count += 1;
+
+                let path = relative_directory.join(&name);
+                let (size, modified_at, children) = match kind {
+                    StorageTreeEntryKind::Directory => {
+                        let child_depth = depth + 1;
+                        if child_depth >= self.limits.max_tree_depth {
+                            return Err(LocalFileStorageError::TreeDepthLimitExceeded {
+                                maximum: self.limits.max_tree_depth,
+                            });
+                        }
+                        let children = self
+                            .read_tree_directory(
+                                entry.path(),
+                                path.clone(),
+                                child_depth,
+                                entry_count,
+                            )
+                            .await?;
+                        (None, None, children)
+                    }
+                    StorageTreeEntryKind::File => {
+                        let modified_at = Some(metadata.modified()?.into());
+                        (Some(metadata.len()), modified_at, Vec::new())
+                    }
+                };
+
+                entries.push(StorageTreeEntry {
+                    path,
+                    name: raw_name,
+                    kind,
+                    size,
+                    modified_at,
+                    children,
+                });
+            }
+
+            entries.sort_by(|left, right| {
+                left.kind.cmp(&right.kind).then_with(|| {
+                    left.name
+                        .to_ascii_lowercase()
+                        .cmp(&right.name.to_ascii_lowercase())
+                        .then_with(|| left.name.cmp(&right.name))
+                })
+            });
+            Ok(entries)
         })
     }
 
@@ -318,6 +501,12 @@ pub enum LocalFileStorageError {
     RootFile,
     #[error("the destination already exists")]
     AlreadyExists,
+    #[error("file tree exceeds the configured depth limit of {maximum}")]
+    TreeDepthLimitExceeded { maximum: usize },
+    #[error("file tree exceeds the configured entry limit of {maximum}")]
+    TreeEntryLimitExceeded { maximum: usize },
+    #[error("file exceeds the configured {maximum}-byte stream limit")]
+    ContentTooLarge { maximum: u64 },
     #[error("file-storage root or scope must not be a symbolic link or reparse point")]
     LinkOrReparsePoint,
     #[error("file-storage scope resolves outside its capability root")]
@@ -465,6 +654,129 @@ mod tests {
         assert!(matches!(
             storage.scoped(&linked_scope).await,
             Err(LocalFileStorageError::LinkOrReparsePoint)
+        ));
+    }
+
+    #[tokio::test]
+    async fn builds_a_recursive_deterministic_tree_with_metadata() {
+        let directory = TestDirectory::new();
+        fs::create_dir_all(directory.0.join("city").join("interiors")).unwrap();
+        fs::write(directory.0.join("z.map"), b"root").unwrap();
+        fs::write(directory.0.join("city").join("race.map"), b"race").unwrap();
+        fs::write(
+            directory
+                .0
+                .join("city")
+                .join("interiors")
+                .join("shop.map.off"),
+            b"shop",
+        )
+        .unwrap();
+
+        let storage = LocalFileStorage::open(&directory.0, limits())
+            .await
+            .unwrap();
+        let tree = storage.tree().await.unwrap();
+
+        assert_eq!(tree.len(), 2);
+        assert_eq!(tree[0].name(), "city");
+        assert_eq!(tree[0].kind(), StorageTreeEntryKind::Directory);
+        assert_eq!(tree[0].path().to_string(), "city");
+        assert_eq!(tree[0].children()[0].name(), "interiors");
+        assert_eq!(
+            tree[0].children()[0].children()[0].path().to_string(),
+            "city/interiors/shop.map.off"
+        );
+        assert_eq!(tree[0].children()[1].path().to_string(), "city/race.map");
+        assert_eq!(tree[0].children()[1].size(), Some(4));
+        assert!(tree[0].children()[1].modified_at().is_some());
+        assert_eq!(tree[1].name(), "z.map");
+    }
+
+    #[tokio::test]
+    async fn enforces_tree_depth_and_entry_limits() {
+        let directory = TestDirectory::new();
+        fs::create_dir_all(directory.0.join("nested")).unwrap();
+        fs::write(directory.0.join("one.map"), b"1").unwrap();
+        fs::write(directory.0.join("two.map"), b"2").unwrap();
+
+        let shallow =
+            LocalFileStorage::open(&directory.0, FileStorageLimits::new(1, 100, 1024).unwrap())
+                .await
+                .unwrap();
+        assert!(matches!(
+            shallow.tree().await,
+            Err(LocalFileStorageError::TreeDepthLimitExceeded { maximum: 1 })
+        ));
+
+        let limited =
+            LocalFileStorage::open(&directory.0, FileStorageLimits::new(8, 2, 1024).unwrap())
+                .await
+                .unwrap();
+        assert!(matches!(
+            limited.tree().await,
+            Err(LocalFileStorageError::TreeEntryLimitExceeded { maximum: 2 })
+        ));
+    }
+
+    #[tokio::test]
+    async fn ignores_links_while_building_the_tree() {
+        let directory = TestDirectory::new();
+        let target = directory.0.join("target");
+        let link = directory.0.join("linked");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("map.map"), b"map").unwrap();
+
+        if let Err(error) = create_directory_link(&target, &link) {
+            if error.kind() == io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(1314)
+            {
+                return;
+            }
+            panic!("failed to create test symlink: {error}");
+        }
+
+        let storage = LocalFileStorage::open(&directory.0, limits())
+            .await
+            .unwrap();
+        let tree = storage.tree().await.unwrap();
+
+        assert!(tree.iter().any(|entry| entry.name() == "target"));
+        assert!(!tree.iter().any(|entry| entry.name() == "linked"));
+    }
+
+    #[tokio::test]
+    async fn opens_an_opaque_length_bounded_file_stream() {
+        let directory = TestDirectory::new();
+        let bytes = vec![0x00, 0xff, 0x98, 0x10];
+        fs::write(directory.0.join("binary.map"), &bytes).unwrap();
+        let storage = LocalFileStorage::open(&directory.0, limits())
+            .await
+            .unwrap();
+        let path = RelativeStoragePath::new("binary.map").unwrap();
+
+        let mut opened = storage.open_file(&path).await.unwrap();
+        let mut actual = Vec::new();
+        opened.reader.read_to_end(&mut actual).await.unwrap();
+
+        assert_eq!(actual, bytes);
+        assert_eq!(opened.content_length, 4);
+        assert_eq!(opened.revision.size(), 4);
+    }
+
+    #[tokio::test]
+    async fn refuses_to_stream_files_above_the_configured_limit() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("large.map"), b"12345").unwrap();
+        let storage =
+            LocalFileStorage::open(&directory.0, FileStorageLimits::new(8, 100, 4).unwrap())
+                .await
+                .unwrap();
+
+        assert!(matches!(
+            storage
+                .open_file(&RelativeStoragePath::new("large.map").unwrap())
+                .await,
+            Err(LocalFileStorageError::ContentTooLarge { maximum: 4 })
         ));
     }
 

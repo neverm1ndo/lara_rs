@@ -18,6 +18,9 @@ const MIN_TREE_ENTRIES: u64 = 1;
 const MAX_TREE_ENTRIES: u64 = 1_000_000;
 const MIN_STREAM_SIZE_BYTES: u64 = 1;
 const MAX_STREAM_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
+const MIN_MAP_FILES_PER_REQUEST: u64 = 1;
+const MAX_MAP_FILES_PER_REQUEST: u64 = 1_000;
+const MAX_MAP_BATCH_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
 
 impl AppConfig {
     /// Loads configuration in ascending priority order:
@@ -55,6 +58,7 @@ impl AppConfig {
             "configuration.files.configurator_directory",
             &self.configuration.files.configurator_directory,
         )?;
+        require_relative_path("maps.files.directory", &self.maps.files.directory)?;
 
         if self.jwt.secret.expose_secret().len() < MIN_JWT_SECRET_BYTES {
             return Err(ConfigError::JwtSecretTooShort {
@@ -85,6 +89,24 @@ impl AppConfig {
         validate_binary_file_names(&self.configuration.files.binary_file_names)?;
         validate_ignored_paths(&self.configuration.files.ignored_paths)?;
         validate_text_encoding(&self.configuration.files.fallback_encoding)?;
+        require_range(
+            "maps.upload.max_files_per_request",
+            self.maps.upload.max_files_per_request as u64,
+            MIN_MAP_FILES_PER_REQUEST,
+            MAX_MAP_FILES_PER_REQUEST,
+        )?;
+        require_range(
+            "maps.upload.max_file_size_bytes",
+            self.maps.upload.max_file_size_bytes,
+            MIN_STREAM_SIZE_BYTES,
+            self.game_server.storage.max_stream_size_bytes,
+        )?;
+        require_range(
+            "maps.upload.max_total_size_bytes",
+            self.maps.upload.max_total_size_bytes,
+            self.maps.upload.max_file_size_bytes,
+            MAX_MAP_BATCH_SIZE_BYTES,
+        )?;
         Ok(())
     }
 }
@@ -99,6 +121,10 @@ fn log_loaded_configuration(config: &AppConfig) {
         file_storage_max_tree_depth = config.game_server.storage.max_tree_depth,
         file_storage_max_tree_entries = config.game_server.storage.max_tree_entries,
         file_storage_max_stream_size_bytes = config.game_server.storage.max_stream_size_bytes,
+        maps_directory = %config.maps.files.directory.display(),
+        maps_max_files_per_request = config.maps.upload.max_files_per_request,
+        maps_max_file_size_bytes = config.maps.upload.max_file_size_bytes,
+        maps_max_total_size_bytes = config.maps.upload.max_total_size_bytes,
         "server configuration loaded"
     );
 }
@@ -382,6 +408,16 @@ mod tests {
                     fallback_encoding: "windows-1251".into(),
                 },
             },
+            maps: super::super::model::MapsConfig {
+                files: super::super::model::MapsFilesConfig {
+                    directory: "scriptfiles/maps".into(),
+                },
+                upload: super::super::model::MapsUploadConfig {
+                    max_files_per_request: 50,
+                    max_file_size_bytes: 10 * 1024 * 1024,
+                    max_total_size_bytes: 50 * 1024 * 1024,
+                },
+            },
         }
     }
 
@@ -506,6 +542,69 @@ mod tests {
                 Err(ConfigError::InvalidRelativePath {
                     key: "configuration.files.configurator_directory"
                 })
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_unsafe_maps_directory() {
+        for path in ["", ".", "../maps", "scriptfiles/../maps", "C:/maps"] {
+            let mut config = valid_config();
+            config.maps.files.directory = path.into();
+
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidRelativePath {
+                    key: "maps.files.directory"
+                })
+            ));
+        }
+    }
+
+    #[test]
+    fn validates_maps_upload_limits_and_their_relationships() {
+        let cases: Vec<(&str, ConfigMutation)> = vec![
+            (
+                "maps.upload.max_files_per_request",
+                Box::new(|config| config.maps.upload.max_files_per_request = 0),
+            ),
+            (
+                "maps.upload.max_files_per_request",
+                Box::new(|config| config.maps.upload.max_files_per_request = 1_001),
+            ),
+            (
+                "maps.upload.max_file_size_bytes",
+                Box::new(|config| config.maps.upload.max_file_size_bytes = 0),
+            ),
+            (
+                "maps.upload.max_file_size_bytes",
+                Box::new(|config| {
+                    config.maps.upload.max_file_size_bytes =
+                        config.game_server.storage.max_stream_size_bytes + 1
+                }),
+            ),
+            (
+                "maps.upload.max_total_size_bytes",
+                Box::new(|config| {
+                    config.maps.upload.max_total_size_bytes =
+                        config.maps.upload.max_file_size_bytes - 1
+                }),
+            ),
+            (
+                "maps.upload.max_total_size_bytes",
+                Box::new(|config| {
+                    config.maps.upload.max_total_size_bytes = MAX_MAP_BATCH_SIZE_BYTES + 1
+                }),
+            ),
+        ];
+
+        for (key, mutate) in cases {
+            let mut config = valid_config();
+            mutate(&mut config);
+
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::ValueOutOfRange { key: invalid_key, .. }) if invalid_key == key
             ));
         }
     }
@@ -689,6 +788,14 @@ mod tests {
             binary_file_names = ["omp-server", "samp03svr"]
             ignored_paths = ["logs"]
             fallback_encoding = "windows-1251"
+
+            [maps.files]
+            directory = "scriptfiles/maps"
+
+            [maps.upload]
+            max_files_per_request = 50
+            max_file_size_bytes = 10485760
+            max_total_size_bytes = 52428800
         "#;
         let environment = Map::from([
             ("LARA_SERVER__BIND_ADDRESS".into(), "0.0.0.0:8080".into()),
@@ -712,6 +819,22 @@ mod tests {
             (
                 "LARA_CONFIGURATION__FILES__IGNORED_PATHS".into(),
                 "logs,scriptfiles/cache".into(),
+            ),
+            (
+                "LARA_MAPS__FILES__DIRECTORY".into(),
+                "scriptfiles/custom-maps".into(),
+            ),
+            (
+                "LARA_MAPS__UPLOAD__MAX_FILES_PER_REQUEST".into(),
+                "25".into(),
+            ),
+            (
+                "LARA_MAPS__UPLOAD__MAX_FILE_SIZE_BYTES".into(),
+                "5242880".into(),
+            ),
+            (
+                "LARA_MAPS__UPLOAD__MAX_TOTAL_SIZE_BYTES".into(),
+                "26214400".into(),
             ),
         ]);
 
@@ -748,6 +871,13 @@ mod tests {
             ]
         );
         assert_eq!(config.mysql.url.expose_secret(), "mysql://localhost/file");
+        assert_eq!(
+            config.maps.files.directory,
+            std::path::PathBuf::from("scriptfiles/custom-maps")
+        );
+        assert_eq!(config.maps.upload.max_files_per_request, 25);
+        assert_eq!(config.maps.upload.max_file_size_bytes, 5_242_880);
+        assert_eq!(config.maps.upload.max_total_size_bytes, 26_214_400);
     }
 
     #[test]
