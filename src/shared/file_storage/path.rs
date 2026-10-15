@@ -36,6 +36,23 @@ impl RelativeStoragePath {
         Self { components }
     }
 
+    pub fn join_path(&self, suffix: &Self) -> Self {
+        let mut components = self.components.clone();
+        components.extend(suffix.components.iter().cloned());
+        Self { components }
+    }
+
+    /// Returns true for the path itself and all of its descendants. ASCII
+    /// case-insensitive comparison keeps access rules portable to Windows.
+    pub fn is_within_case_insensitive(&self, ancestor: &Self) -> bool {
+        self.components.len() >= ancestor.components.len()
+            && self
+                .components
+                .iter()
+                .zip(&ancestor.components)
+                .all(|(component, expected)| component.eq_ignore_ascii_case(expected))
+    }
+
     pub fn parent(&self) -> Option<Self> {
         let mut components = self.components.clone();
         components.pop()?;
@@ -225,10 +242,38 @@ mod tests {
                 .join("config")
                 .join("server.cfg")
         );
-        assert_eq!(file.parent(), Some(directory));
+        assert_eq!(file.parent(), Some(directory.clone()));
         assert_eq!(
             RelativeStoragePath::new("server.cfg").unwrap().parent(),
             Some(root)
+        );
+
+        let nested = RelativeStoragePath::new("nested/settings.cfg").unwrap();
+        assert_eq!(
+            directory.join_path(&nested).to_string(),
+            "scriptfiles/config/nested/settings.cfg"
+        );
+    }
+
+    #[test]
+    fn checks_ancestor_relationship_by_component_and_ignores_ascii_case() {
+        let ignored = RelativeStoragePath::new("ScriptFiles/Cache").unwrap();
+
+        assert!(ignored.is_within_case_insensitive(&ignored));
+        assert!(
+            RelativeStoragePath::new("scriptfiles/cache/data.bin")
+                .unwrap()
+                .is_within_case_insensitive(&ignored)
+        );
+        assert!(
+            !RelativeStoragePath::new("scriptfiles/cache-old/data.bin")
+                .unwrap()
+                .is_within_case_insensitive(&ignored)
+        );
+        assert!(
+            !RelativeStoragePath::new("cache/data.bin")
+                .unwrap()
+                .is_within_case_insensitive(&ignored)
         );
     }
 
