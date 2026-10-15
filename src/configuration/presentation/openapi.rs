@@ -2,8 +2,8 @@ use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
 use super::dto::{
-    ConfigurationTreeEntryKindResponse, ConfigurationTreeEntryResponse, ConfigurationTreeResponse,
-    ErrorResponse, FileMutationResponse, RenameFileRequest, WriteFileRequest,
+    ConfigurationFileUpload, ConfigurationTreeEntryKindResponse, ConfigurationTreeEntryResponse,
+    ConfigurationTreeResponse, ErrorResponse, FileMutationResponse, RenameFileRequest,
 };
 
 const BEARER_AUTH_SCHEME: &str = "bearerAuth";
@@ -12,9 +12,9 @@ const BEARER_AUTH_SCHEME: &str = "bearerAuth";
 #[openapi(
     components(schemas(
         ConfigurationTreeResponse,
+        ConfigurationFileUpload,
         ConfigurationTreeEntryResponse,
         ConfigurationTreeEntryKindResponse,
-        WriteFileRequest,
         RenameFileRequest,
         FileMutationResponse,
         ErrorResponse
@@ -94,6 +94,10 @@ mod tests {
         fn configuration_file_service(&self) -> Arc<dyn ConfigurationFileService> {
             panic!("documentation generation does not resolve application services")
         }
+
+        fn configuration_file_encoding(&self) -> &'static encoding_rs::Encoding {
+            encoding_rs::WINDOWS_1251
+        }
     }
 
     fn document() -> utoipa::openapi::OpenApi {
@@ -126,8 +130,18 @@ mod tests {
             "bearer"
         );
         assert_eq!(
-            files["get"]["responses"]["200"]["content"]["text/plain"]["schema"]["type"],
+            files["get"]["responses"]["200"]["content"]["text/plain; charset=windows-1251"]["schema"]
+                ["type"],
             "string"
+        );
+        for method in ["post", "put"] {
+            let upload = &files[method]["requestBody"]["content"]["multipart/form-data"];
+            assert!(upload.is_object());
+        }
+        assert_eq!(
+            specification["components"]["schemas"]["ConfigurationFileUpload"]["properties"]["file"]
+                ["format"],
+            "binary"
         );
     }
 }

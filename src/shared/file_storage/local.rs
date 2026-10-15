@@ -6,7 +6,11 @@ use std::{
 
 use thiserror::Error;
 
-use super::{mutation::FileRevision, path::RelativeStoragePath};
+use super::{
+    guard::{FileSnapshot, FileSnapshotSource, ReadFileSnapshotError, ReadFileSnapshotFuture},
+    mutation::FileRevision,
+    path::RelativeStoragePath,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileStorageLimits {
@@ -226,6 +230,57 @@ impl LocalFileStorage {
     }
 }
 
+impl FileSnapshotSource for LocalFileStorage {
+    fn read_verified<'a>(&'a self, snapshot: &'a FileSnapshot) -> ReadFileSnapshotFuture<'a> {
+        Box::pin(async move {
+            if snapshot.revision().size() > self.limits.max_stream_size_bytes {
+                return Err(ReadFileSnapshotError::ContentTooLarge);
+            }
+
+            let before = self
+                .file_revision(snapshot.path())
+                .await
+                .map_err(snapshot_read_error)?;
+            if &before != snapshot.revision() {
+                return Err(ReadFileSnapshotError::Changed);
+            }
+
+            let target = self
+                .resolve_existing_file(snapshot.path())
+                .await
+                .map_err(snapshot_read_error)?;
+            let content = tokio::fs::read(target)
+                .await
+                .map_err(|error| snapshot_read_error(error.into()))?;
+            if content.len() as u64 > self.limits.max_stream_size_bytes {
+                return Err(ReadFileSnapshotError::ContentTooLarge);
+            }
+
+            let after = self
+                .file_revision(snapshot.path())
+                .await
+                .map_err(snapshot_read_error)?;
+            if before != after
+                || &after != snapshot.revision()
+                || after.size() != content.len() as u64
+            {
+                return Err(ReadFileSnapshotError::Changed);
+            }
+
+            Ok(content)
+        })
+    }
+}
+
+fn snapshot_read_error(error: LocalFileStorageError) -> ReadFileSnapshotError {
+    match error {
+        LocalFileStorageError::Io(error) if error.kind() == io::ErrorKind::NotFound => {
+            ReadFileSnapshotError::Changed
+        }
+        _ => ReadFileSnapshotError::Unavailable,
+    }
+}
+
 fn absolute_path(path: &Path) -> Result<PathBuf, io::Error> {
     if path.is_absolute() {
         Ok(path.to_owned())
@@ -411,6 +466,45 @@ mod tests {
             storage.scoped(&linked_scope).await,
             Err(LocalFileStorageError::LinkOrReparsePoint)
         ));
+    }
+
+    #[tokio::test]
+    async fn reads_only_the_verified_snapshot_bytes() {
+        let directory = TestDirectory::new();
+        let cp1251 = vec![0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2];
+        fs::write(directory.0.join("server.cfg"), &cp1251).unwrap();
+        let storage = LocalFileStorage::open(&directory.0, limits())
+            .await
+            .unwrap();
+        let path = RelativeStoragePath::new("server.cfg").unwrap();
+        let revision = storage.file_revision(&path).await.unwrap();
+        let snapshot = FileSnapshot::new(path.clone(), revision).unwrap();
+
+        assert_eq!(storage.read_verified(&snapshot).await.unwrap(), cp1251);
+
+        fs::write(directory.0.join("server.cfg"), b"changed-content").unwrap();
+        assert_eq!(
+            storage.read_verified(&snapshot).await,
+            Err(ReadFileSnapshotError::Changed)
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_to_materialize_a_snapshot_above_the_read_limit() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("server.cfg"), b"12345").unwrap();
+        let storage =
+            LocalFileStorage::open(&directory.0, FileStorageLimits::new(8, 100, 4).unwrap())
+                .await
+                .unwrap();
+        let path = RelativeStoragePath::new("server.cfg").unwrap();
+        let revision = storage.file_revision(&path).await.unwrap();
+        let snapshot = FileSnapshot::new(path, revision).unwrap();
+
+        assert_eq!(
+            storage.read_verified(&snapshot).await,
+            Err(ReadFileSnapshotError::ContentTooLarge)
+        );
     }
 
     #[cfg(unix)]

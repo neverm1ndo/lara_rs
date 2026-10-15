@@ -59,7 +59,12 @@ impl FileMutationCoordinator {
         let initial_snapshot = self.snapshot_for(request.operation()).await?;
         let permit = self
             .before_mutation
-            .prepare(request, initial_snapshot.as_ref(), backup_requirement)
+            .prepare(
+                request,
+                initial_snapshot.as_ref(),
+                &self.storage,
+                backup_requirement,
+            )
             .await?;
 
         if permit.mutation_id() != request.mutation_id() {
@@ -211,7 +216,7 @@ mod tests {
 
     use super::*;
     use crate::shared::file_storage::{
-        guard::{BeforeMutationFuture, NoBackupProvider},
+        guard::{BackupReceipt, BeforeMutationFuture, FileSnapshotSource, NoBackupProvider},
         local::FileStorageLimits,
         mutation::{MutationActor, StorageNamespace},
         path::RelativeStoragePath,
@@ -347,6 +352,90 @@ mod tests {
         );
     }
 
+    struct ReceiptGuard;
+
+    impl BeforeFileMutation for ReceiptGuard {
+        fn prepare<'a>(
+            &'a self,
+            request: &'a FileMutationRequest,
+            current_file: Option<&'a FileSnapshot>,
+            snapshot_source: &'a dyn FileSnapshotSource,
+            requirement: BackupRequirement,
+        ) -> BeforeMutationFuture<'a> {
+            Box::pin(async move {
+                let snapshot = current_file.expect("overwrite has a source snapshot");
+                let content = snapshot_source
+                    .read_verified(snapshot)
+                    .await
+                    .map_err(|error| BeforeFileMutationError::Rejected {
+                        reason: error.to_string(),
+                    })?;
+                if content != b"original" {
+                    return Err(BeforeFileMutationError::Rejected {
+                        reason: "snapshot content mismatch".into(),
+                    });
+                }
+                let receipt = BackupReceipt::new(
+                    request.mutation_id(),
+                    "backup-1",
+                    snapshot.revision().clone(),
+                    Utc::now(),
+                )?;
+                MutationPermit::new(request, current_file, Some(receipt), requirement)
+                    .map_err(Into::into)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn required_backup_receipt_flows_through_to_the_completed_event() {
+        let directory = TestDirectory::new();
+        std::fs::write(directory.0.join("server.cfg"), b"original").unwrap();
+        let coordinator = coordinator(&directory, Arc::new(ReceiptGuard)).await;
+        let request =
+            FileMutationRequest::overwrite(namespace(), actor(), path("server.cfg"), None).unwrap();
+
+        let event = coordinator
+            .execute(
+                &request,
+                FileMutationPayload::Content(b"changed".to_vec()),
+                BackupRequirement::Required,
+            )
+            .await
+            .unwrap();
+
+        let receipt = event.backup_receipt().unwrap();
+        assert_eq!(receipt.backup_id(), "backup-1");
+        assert_eq!(receipt.mutation_id(), request.mutation_id());
+        assert_eq!(
+            receipt.source_revision(),
+            event.previous_revision().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn stores_non_utf8_configuration_bytes_without_transcoding() {
+        let directory = TestDirectory::new();
+        let coordinator = coordinator(&directory, Arc::new(NoBackupProvider)).await;
+        let cp1251 = vec![0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2];
+        let request =
+            FileMutationRequest::create(namespace(), actor(), path("server.cfg")).unwrap();
+
+        coordinator
+            .execute(
+                &request,
+                FileMutationPayload::Content(cp1251.clone()),
+                BackupRequirement::Disabled,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read(directory.0.join("server.cfg")).unwrap(),
+            cp1251
+        );
+    }
+
     struct MutatingGuard {
         absolute_path: std::path::PathBuf,
     }
@@ -356,6 +445,7 @@ mod tests {
             &'a self,
             request: &'a FileMutationRequest,
             current_file: Option<&'a FileSnapshot>,
+            _snapshot_source: &'a dyn FileSnapshotSource,
             requirement: BackupRequirement,
         ) -> BeforeMutationFuture<'a> {
             Box::pin(async move {

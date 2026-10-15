@@ -179,6 +179,16 @@ fn validate_snapshot(
 pub type BeforeMutationFuture<'a> =
     Pin<Box<dyn Future<Output = Result<MutationPermit, BeforeFileMutationError>> + Send + 'a>>;
 
+pub type ReadFileSnapshotFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<Vec<u8>, ReadFileSnapshotError>> + Send + 'a>>;
+
+/// Capability-safe content access offered to a pre-mutation consumer. A
+/// backups implementation can persist the exact source bytes without knowing
+/// the configuration storage root or importing its infrastructure.
+pub trait FileSnapshotSource: Send + Sync {
+    fn read_verified<'a>(&'a self, snapshot: &'a FileSnapshot) -> ReadFileSnapshotFuture<'a>;
+}
+
 /// Synchronous-in-the-workflow guard invoked before a filesystem mutation.
 /// Implementations may persist a backup and must not return until it is safe to
 /// continue.
@@ -187,6 +197,7 @@ pub trait BeforeFileMutation: Send + Sync {
         &'a self,
         request: &'a FileMutationRequest,
         current_file: Option<&'a FileSnapshot>,
+        snapshot_source: &'a dyn FileSnapshotSource,
         requirement: BackupRequirement,
     ) -> BeforeMutationFuture<'a>;
 }
@@ -201,6 +212,7 @@ impl BeforeFileMutation for NoBackupProvider {
         &'a self,
         request: &'a FileMutationRequest,
         current_file: Option<&'a FileSnapshot>,
+        _snapshot_source: &'a dyn FileSnapshotSource,
         requirement: BackupRequirement,
     ) -> BeforeMutationFuture<'a> {
         Box::pin(async move {
@@ -223,6 +235,16 @@ pub enum BeforeFileMutationError {
     Unavailable { message: String },
     #[error(transparent)]
     InvalidPermit(#[from] InvalidMutationPermit),
+}
+
+#[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
+pub enum ReadFileSnapshotError {
+    #[error("file changed while its snapshot was being read")]
+    Changed,
+    #[error("file snapshot exceeds the storage read limit")]
+    ContentTooLarge,
+    #[error("file snapshot source is unavailable")]
+    Unavailable,
 }
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
@@ -286,6 +308,14 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    struct UnusedSnapshotSource;
+
+    impl FileSnapshotSource for UnusedSnapshotSource {
+        fn read_verified<'a>(&'a self, _snapshot: &'a FileSnapshot) -> ReadFileSnapshotFuture<'a> {
+            Box::pin(async { Err(ReadFileSnapshotError::Unavailable) })
+        }
     }
 
     #[test]
@@ -441,7 +471,12 @@ mod tests {
 
         for requirement in [BackupRequirement::Disabled, BackupRequirement::Optional] {
             let permit = NoBackupProvider
-                .prepare(&request, Some(&snapshot), requirement)
+                .prepare(
+                    &request,
+                    Some(&snapshot),
+                    &UnusedSnapshotSource,
+                    requirement,
+                )
                 .await
                 .unwrap();
             assert!(permit.backup_receipt().is_none());
@@ -449,7 +484,12 @@ mod tests {
 
         assert!(matches!(
             NoBackupProvider
-                .prepare(&request, Some(&snapshot), BackupRequirement::Required)
+                .prepare(
+                    &request,
+                    Some(&snapshot),
+                    &UnusedSnapshotSource,
+                    BackupRequirement::Required,
+                )
                 .await,
             Err(BeforeFileMutationError::RequiredBackupUnavailable)
         ));

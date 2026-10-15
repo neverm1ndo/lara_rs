@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 async-compression = "0.4.50"
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["multipart"] }
 chrono = "0.4.45"
 config = { version = "0.15.27", default-features = false, features = ["toml"] }
 dotenvy = "0.15.7"

@@ -13,12 +13,11 @@ pub struct FilePathQuery {
     pub path: String,
 }
 
-#[derive(Debug, Deserialize, ToSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct WriteFileRequest {
-    /// Slash-separated path relative to the caller's configuration capability.
-    pub path: String,
-    pub content: String,
+/// OpenAPI representation of the multipart upload consumed by the handlers.
+#[derive(Debug, ToSchema)]
+pub struct ConfigurationFileUpload {
+    #[schema(format = Binary)]
+    pub file: String,
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
