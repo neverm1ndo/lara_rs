@@ -9,3 +9,6 @@ pub mod state;
 pub use openapi::base_document as openapi_document;
 #[allow(unused_imports)]
 pub use routes::router;
+
+#[cfg(test)]
+mod tests;

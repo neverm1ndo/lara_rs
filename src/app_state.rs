@@ -6,7 +6,8 @@ use crate::auth::{
 };
 use crate::{
     configuration::presentation::authorization::ConfigurationAuthorizationState,
-    shared::file_storage::path::RelativeStoragePath,
+    maps::{application::file_service::MapsFileService, presentation::state::MapsState},
+    shared::file_storage::{path::RelativeStoragePath, upload::MultipartUploadLimits},
 };
 
 #[derive(Clone)]
@@ -14,6 +15,8 @@ pub struct AppState {
     jwt_authenticator: Arc<dyn AuthenticateBearerToken>,
     login_service: Arc<dyn Login>,
     configurator_directory: RelativeStoragePath,
+    maps_file_service: Arc<dyn MapsFileService>,
+    maps_upload_limits: MultipartUploadLimits,
 }
 
 impl AppState {
@@ -21,11 +24,15 @@ impl AppState {
         authenticator: impl AuthenticateBearerToken + 'static,
         login_service: impl Login + 'static,
         configurator_directory: RelativeStoragePath,
+        maps_file_service: impl MapsFileService + 'static,
+        maps_upload_limits: MultipartUploadLimits,
     ) -> Self {
         Self {
             jwt_authenticator: Arc::new(authenticator),
             login_service: Arc::new(login_service),
             configurator_directory,
+            maps_file_service: Arc::new(maps_file_service),
+            maps_upload_limits,
         }
     }
 }
@@ -45,5 +52,15 @@ impl JwtExtractorState for AppState {
 impl ConfigurationAuthorizationState for AppState {
     fn configurator_directory(&self) -> &RelativeStoragePath {
         &self.configurator_directory
+    }
+}
+
+impl MapsState for AppState {
+    fn maps_file_service(&self) -> Arc<dyn MapsFileService> {
+        Arc::clone(&self.maps_file_service)
+    }
+
+    fn maps_upload_limits(&self) -> MultipartUploadLimits {
+        self.maps_upload_limits
     }
 }
