@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-async-compression = "0.4.50"
+async-compression = { version = "0.4.50", features = ["gzip", "tokio"] }
 axum = { version = "0.8.9", features = ["multipart"] }
 chrono = "0.4.45"
 config = { version = "0.15.27", default-features = false, features = ["toml"] }
@@ -20,6 +20,7 @@ pest_derive = "2.9.3"
 sea-orm = { version = "2.0.4", features = ["sqlx-mysql", "runtime-tokio-rustls"] }
 serde = "1.0.229"
 serde_json = "1.0.152"
+sha2 = "0.10.9"
 similar = "3.2.0"
 socketioxide = "0.18.7"
 subtle = "2.6.1"

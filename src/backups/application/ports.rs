@@ -126,6 +126,7 @@ pub trait BackupSnapshotStore: Send + Sync {
         &'a self,
         backup_id: BackupId,
         expected_hash: &'a FileContentHash,
+        compression: SnapshotCompression,
     ) -> BackupSnapshotStoreFuture<'a, OpenedBackupSnapshot>;
 
     fn remove<'a>(&'a self, backup_id: BackupId) -> BackupSnapshotStoreFuture<'a, ()>;
