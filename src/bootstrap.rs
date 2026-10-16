@@ -51,9 +51,14 @@ use crate::{
             upload::MultipartUploadLimits,
         },
     },
-    user::infrastructure::{
-        authenticated_user_repository::SeaOrmAuthenticatedUserRepository,
-        login_user_repository::SeaOrmLoginUserRepository,
+    user::{
+        self,
+        application::get_user::GetUserService,
+        infrastructure::{
+            authenticated_user_repository::SeaOrmAuthenticatedUserRepository,
+            login_user_repository::SeaOrmLoginUserRepository,
+            user_profile_repository::SeaOrmUserProfileRepository,
+        },
     },
 };
 
@@ -185,9 +190,11 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         config.jwt.audience.clone(),
     )?;
     let authenticated_users = SeaOrmAuthenticatedUserRepository::new(mysql.clone());
+    let user_profiles = SeaOrmUserProfileRepository::new(mysql.clone());
     let login_users = SeaOrmLoginUserRepository::new(mysql);
     let authenticator =
         JwtAuthenticationService::new(verifier, sessions.clone(), authenticated_users);
+    let get_user_service = GetUserService::new(user_profiles);
     let login_service = LoginService::new(
         LegacyMd5Verifier,
         login_users,
@@ -201,6 +208,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let state = AppState::new(
         authenticator,
         login_service,
+        get_user_service,
         configurator_directory,
         maps_file_service,
         maps_upload_limits,
@@ -213,6 +221,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         .nest("/auth", auth::presentation::router::<AppState>())
         .nest("/maps", maps::presentation::router::<AppState>())
         .nest("/backups", backups::presentation::router::<AppState>())
+        .nest("/user", user::presentation::router::<AppState>())
         .with_state(state)
         .split_for_parts();
 
@@ -251,6 +260,7 @@ mod tests {
         },
         maps::{application::file_service::MapsFileService, presentation::state::MapsState},
         shared::file_storage::upload::MultipartUploadLimits,
+        user::{application::get_user::GetUser, presentation::state::UserState},
     };
 
     #[derive(Clone)]
@@ -284,12 +294,19 @@ mod tests {
         }
     }
 
+    impl UserState for DocumentationState {
+        fn get_user_service(&self) -> Arc<dyn GetUser> {
+            panic!("documentation generation does not resolve application services")
+        }
+    }
+
     #[test]
-    fn global_openapi_document_contains_auth_and_maps_routes() {
+    fn global_openapi_document_contains_domain_routes() {
         let document = OpenApiRouter::<DocumentationState>::with_openapi(base_openapi_document())
             .nest("/auth", auth::presentation::router())
             .nest("/maps", maps::presentation::router())
             .nest("/backups", backups::presentation::router())
+            .nest("/user", user::presentation::router())
             .into_openapi();
         let specification = serde_json::to_value(document).unwrap();
 
@@ -301,6 +318,7 @@ mod tests {
         assert!(specification["paths"]["/backups/list"]["get"].is_object());
         assert!(specification["paths"]["/backups/backup/{backup_id}"]["get"].is_object());
         assert!(specification["paths"]["/backups/restore/{backup_id}"]["post"].is_object());
+        assert!(specification["paths"]["/user/{id}"]["get"].is_object());
         assert!(specification["components"]["schemas"]["MapFileMutationsResponse"].is_object());
         assert_eq!(
             specification["components"]["securitySchemes"]["bearerAuth"]["scheme"],

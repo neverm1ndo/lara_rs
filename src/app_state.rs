@@ -9,12 +9,14 @@ use crate::{
     configuration::presentation::authorization::ConfigurationAuthorizationState,
     maps::{application::file_service::MapsFileService, presentation::state::MapsState},
     shared::file_storage::{path::RelativeStoragePath, upload::MultipartUploadLimits},
+    user::{application::get_user::GetUser, presentation::state::UserState},
 };
 
 #[derive(Clone)]
 pub struct AppState {
     jwt_authenticator: Arc<dyn AuthenticateBearerToken>,
     login_service: Arc<dyn Login>,
+    get_user_service: Arc<dyn GetUser>,
     configurator_directory: RelativeStoragePath,
     maps_file_service: Arc<dyn MapsFileService>,
     maps_upload_limits: MultipartUploadLimits,
@@ -25,6 +27,7 @@ impl AppState {
     pub fn new(
         authenticator: impl AuthenticateBearerToken + 'static,
         login_service: impl Login + 'static,
+        get_user_service: impl GetUser + 'static,
         configurator_directory: RelativeStoragePath,
         maps_file_service: impl MapsFileService + 'static,
         maps_upload_limits: MultipartUploadLimits,
@@ -33,11 +36,18 @@ impl AppState {
         Self {
             jwt_authenticator: Arc::new(authenticator),
             login_service: Arc::new(login_service),
+            get_user_service: Arc::new(get_user_service),
             configurator_directory,
             maps_file_service: Arc::new(maps_file_service),
             maps_upload_limits,
             backup_lifecycle_service,
         }
+    }
+}
+
+impl UserState for AppState {
+    fn get_user_service(&self) -> Arc<dyn GetUser> {
+        Arc::clone(&self.get_user_service)
     }
 }
 
