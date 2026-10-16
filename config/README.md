@@ -44,6 +44,19 @@ TOML, а секреты и точечные переопределения пе�
 | `maps.upload.max_files_per_request` | `LARA_MAPS__UPLOAD__MAX_FILES_PER_REQUEST` |
 | `maps.upload.max_file_size_bytes` | `LARA_MAPS__UPLOAD__MAX_FILE_SIZE_BYTES` |
 | `maps.upload.max_total_size_bytes` | `LARA_MAPS__UPLOAD__MAX_TOTAL_SIZE_BYTES` |
+| `backups.storage.directory` | `LARA_BACKUPS__STORAGE__DIRECTORY` |
+| `backups.storage.compression` | `LARA_BACKUPS__STORAGE__COMPRESSION` |
+| `backups.storage.compression_level` | `LARA_BACKUPS__STORAGE__COMPRESSION_LEVEL` |
+| `backups.storage.compression_threshold_bytes` | `LARA_BACKUPS__STORAGE__COMPRESSION_THRESHOLD_BYTES` |
+| `backups.retention.lifetime_seconds` | `LARA_BACKUPS__RETENTION__LIFETIME_SECONDS` |
+| `backups.retention.cleanup_interval_seconds` | `LARA_BACKUPS__RETENTION__CLEANUP_INTERVAL_SECONDS` |
+| `backups.retention.cleanup_batch_size` | `LARA_BACKUPS__RETENTION__CLEANUP_BATCH_SIZE` |
+| `backups.retention.max_concurrent_deletions` | `LARA_BACKUPS__RETENTION__MAX_CONCURRENT_DELETIONS` |
+| `backups.retention.operation_lease_seconds` | `LARA_BACKUPS__RETENTION__OPERATION_LEASE_SECONDS` |
+| `backups.retention.stale_preparation_seconds` | `LARA_BACKUPS__RETENTION__STALE_PREPARATION_SECONDS` |
+| `backups.diff.enabled` | `LARA_BACKUPS__DIFF__ENABLED` |
+| `backups.diff.max_input_size_bytes` | `LARA_BACKUPS__DIFF__MAX_INPUT_SIZE_BYTES` |
+| `backups.diff.generation_timeout_ms` | `LARA_BACKUPS__DIFF__GENERATION_TIMEOUT_MS` |
 
 Списки в переменных окружения задаются через запятую. Например,
 `LARA_CONFIGURATION__FILES__BINARY_EXTENSIONS=amx,dff,so,txd` и
@@ -94,6 +107,25 @@ directory = "scriptfiles/maps"
 max_files_per_request = 50
 max_file_size_bytes = 10485760
 max_total_size_bytes = 52428800
+
+[backups.storage]
+directory = "/srv/lara/backups"
+compression = "gzip"
+compression_level = 1
+compression_threshold_bytes = 1048576
+
+[backups.retention]
+lifetime_seconds = 1209600
+cleanup_interval_seconds = 3600
+cleanup_batch_size = 50
+max_concurrent_deletions = 8
+operation_lease_seconds = 300
+stale_preparation_seconds = 1800
+
+[backups.diff]
+enabled = true
+max_input_size_bytes = 10485760
+generation_timeout_ms = 5000
 ```
 
 `jwt.secret`, `mysql.url` и `mongodb.uri` рекомендуется передавать только
@@ -119,6 +151,29 @@ JWT TTL (60–86400 секунд), минимальную длину HS256-се�
 содержимым не включаются в дерево и недоступны через configuration API.
 Символические ссылки, Windows junction и другие reparse points всегда
 игнорируются и не имеют отключаемой настройки.
+
+## Хранилище бэкапов
+
+`backups.storage.directory` разрешается относительно рабочей директории
+процесса и обязан находиться вне `game_server.storage.root`. При инициализации
+backups-модуля эта граница дополнительно проверяется после canonicalization,
+чтобы исключить обход через символические ссылки и Windows reparse points.
+
+`compression` принимает `gzip` или `none`. Для `gzip` допустим уровень 0–9;
+для `none` уровень должен быть равен 0. Полный snapshot всегда сохраняется как
+неизменённая последовательность байтов. Сжатие и DiffMatchPatch являются
+отдельными представлениями и не меняют содержимое при download или restore.
+
+`lifetime_seconds` определяет срок хранения. Cleanup запускается через
+`cleanup_interval_seconds`, обрабатывает не более `cleanup_batch_size` записей
+за проход и ограничивает параллелизм через `max_concurrent_deletions`.
+`operation_lease_seconds` защищает активные download/restore от cleanup, а
+`stale_preparation_seconds` используется reconciler для зависших операций.
+
+Diff ограничивается `max_input_size_bytes` и
+`generation_timeout_ms`. Бинарные файлы всё равно архивируются целиком, но для
+них diff получает статус `not_applicable`; ошибка или отключение diff не
+отменяет создание полного snapshot.
 
 ## Кодировка файлов configuration API
 

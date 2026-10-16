@@ -32,6 +32,7 @@ pub struct AppConfig {
     pub game_server: GameServerConfig,
     pub configuration: ConfigurationConfig,
     pub maps: MapsConfig,
+    pub backups: BackupsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +106,47 @@ pub struct MapsUploadConfig {
     pub max_total_size_bytes: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct BackupsConfig {
+    pub storage: BackupStorageConfig,
+    pub retention: BackupRetentionConfig,
+    pub diff: BackupDiffConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BackupStorageConfig {
+    /// Private backup directory. Relative paths are resolved from the server
+    /// process working directory, never from the game-server root.
+    pub directory: PathBuf,
+    pub compression: BackupCompression,
+    pub compression_level: u32,
+    pub compression_threshold_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupCompression {
+    None,
+    Gzip,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BackupRetentionConfig {
+    pub lifetime_seconds: u64,
+    pub cleanup_interval_seconds: u64,
+    pub cleanup_batch_size: usize,
+    pub max_concurrent_deletions: usize,
+    pub operation_lease_seconds: u64,
+    pub stale_preparation_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BackupDiffConfig {
+    pub enabled: bool,
+    pub max_input_size_bytes: u64,
+    pub generation_timeout_ms: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +195,27 @@ mod tests {
                     max_files_per_request: 50,
                     max_file_size_bytes: 10 * 1024 * 1024,
                     max_total_size_bytes: 50 * 1024 * 1024,
+                },
+            },
+            backups: BackupsConfig {
+                storage: BackupStorageConfig {
+                    directory: "D:/backups".into(),
+                    compression: BackupCompression::Gzip,
+                    compression_level: 1,
+                    compression_threshold_bytes: 1024 * 1024,
+                },
+                retention: BackupRetentionConfig {
+                    lifetime_seconds: 14 * 24 * 60 * 60,
+                    cleanup_interval_seconds: 60 * 60,
+                    cleanup_batch_size: 50,
+                    max_concurrent_deletions: 8,
+                    operation_lease_seconds: 300,
+                    stale_preparation_seconds: 1800,
+                },
+                diff: BackupDiffConfig {
+                    enabled: true,
+                    max_input_size_bytes: 10 * 1024 * 1024,
+                    generation_timeout_ms: 5000,
                 },
             },
         };
@@ -205,6 +268,27 @@ mod tests {
                     "max_file_size_bytes": 10485760,
                     "max_total_size_bytes": 52428800
                 }
+            },
+            "backups": {
+                "storage": {
+                    "directory": "D:/backups",
+                    "compression": "gzip",
+                    "compression_level": 1,
+                    "compression_threshold_bytes": 1048576
+                },
+                "retention": {
+                    "lifetime_seconds": 1209600,
+                    "cleanup_interval_seconds": 3600,
+                    "cleanup_batch_size": 50,
+                    "max_concurrent_deletions": 8,
+                    "operation_lease_seconds": 300,
+                    "stale_preparation_seconds": 1800
+                },
+                "diff": {
+                    "enabled": true,
+                    "max_input_size_bytes": 10485760,
+                    "generation_timeout_ms": 5000
+                }
             }
         }))
         .unwrap();
@@ -242,5 +326,12 @@ mod tests {
         assert_eq!(config.maps.upload.max_files_per_request, 50);
         assert_eq!(config.maps.upload.max_file_size_bytes, 10_485_760);
         assert_eq!(config.maps.upload.max_total_size_bytes, 52_428_800);
+        assert_eq!(
+            config.backups.storage.directory,
+            PathBuf::from("D:/backups")
+        );
+        assert_eq!(config.backups.storage.compression, BackupCompression::Gzip);
+        assert_eq!(config.backups.retention.lifetime_seconds, 1_209_600);
+        assert!(config.backups.diff.enabled);
     }
 }

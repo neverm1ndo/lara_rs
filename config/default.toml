@@ -48,6 +48,30 @@ max_files_per_request = 50
 max_file_size_bytes = 10485760
 max_total_size_bytes = 52428800
 
+# Private storage for immutable full-file snapshots and DiffMatchPatch
+# sidecars. This path is resolved from the process working directory and must
+# not be located inside game_server.storage.root.
+[backups.storage]
+directory = "./data/backups"
+compression = "gzip"
+compression_level = 1
+compression_threshold_bytes = 1048576
+
+[backups.retention]
+lifetime_seconds = 1209600 # 14 days
+cleanup_interval_seconds = 3600
+cleanup_batch_size = 50
+max_concurrent_deletions = 8
+operation_lease_seconds = 300
+stale_preparation_seconds = 1800
+
+# Diff artifacts are derived metadata. Full snapshots are still created when
+# diff generation is disabled, unsupported for binary content, or fails.
+[backups.diff]
+enabled = true
+max_input_size_bytes = 10485760
+generation_timeout_ms = 5000
+
 # Secrets and credential-bearing connection strings intentionally do not have
 # file defaults. Supply them through:
 #   LARA_JWT__SECRET

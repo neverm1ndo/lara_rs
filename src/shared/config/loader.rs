@@ -1,8 +1,13 @@
-use std::{collections::HashSet, env, path::Path};
+use std::{
+    collections::HashSet,
+    env,
+    path::{Component, Path, PathBuf},
+};
 
 use ::config::{ConfigBuilder, Environment, File, Map, builder::DefaultState};
 
 use super::{AppConfig, ConfigError};
+use crate::shared::config::model::BackupCompression;
 use crate::shared::file_storage::path::{RelativeStoragePath, StorageFileName};
 
 const DEFAULT_CONFIG_FILE: &str = "config/default.toml";
@@ -21,6 +26,25 @@ const MAX_STREAM_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
 const MIN_MAP_FILES_PER_REQUEST: u64 = 1;
 const MAX_MAP_FILES_PER_REQUEST: u64 = 1_000;
 const MAX_MAP_BATCH_SIZE_BYTES: u64 = 1024 * 1024 * 1024;
+const DEFAULT_BACKUP_DIRECTORY: &str = "./data/backups";
+const DEFAULT_BACKUP_COMPRESSION: &str = "gzip";
+const DEFAULT_BACKUP_COMPRESSION_LEVEL: u32 = 1;
+const DEFAULT_BACKUP_COMPRESSION_THRESHOLD_BYTES: u64 = 1024 * 1024;
+const DEFAULT_BACKUP_LIFETIME_SECONDS: u64 = 14 * 24 * 60 * 60;
+const DEFAULT_BACKUP_CLEANUP_INTERVAL_SECONDS: u64 = 60 * 60;
+const DEFAULT_BACKUP_CLEANUP_BATCH_SIZE: u64 = 50;
+const DEFAULT_BACKUP_MAX_CONCURRENT_DELETIONS: u64 = 8;
+const DEFAULT_BACKUP_OPERATION_LEASE_SECONDS: u64 = 5 * 60;
+const DEFAULT_BACKUP_STALE_PREPARATION_SECONDS: u64 = 30 * 60;
+const DEFAULT_BACKUP_DIFF_ENABLED: bool = true;
+const DEFAULT_BACKUP_DIFF_MAX_INPUT_SIZE_BYTES: u64 = 10 * 1024 * 1024;
+const DEFAULT_BACKUP_DIFF_GENERATION_TIMEOUT_MS: u64 = 5_000;
+const MAX_BACKUP_LIFETIME_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
+const MAX_BACKUP_CLEANUP_BATCH_SIZE: u64 = 1_000;
+const MAX_BACKUP_CONCURRENT_DELETIONS: u64 = 64;
+const MAX_BACKUP_LEASE_SECONDS: u64 = 24 * 60 * 60;
+const MAX_BACKUP_STALE_PREPARATION_SECONDS: u64 = 7 * 24 * 60 * 60;
+const MAX_BACKUP_DIFF_TIMEOUT_MS: u64 = 60_000;
 
 impl AppConfig {
     /// Loads configuration in ascending priority order:
@@ -30,6 +54,49 @@ impl AppConfig {
         let mut builder = ::config::Config::builder()
             .set_default("server.bind_address", DEFAULT_BIND_ADDRESS)?
             .set_default("jwt.ttl_seconds", DEFAULT_JWT_TTL_SECONDS)?
+            .set_default("backups.storage.directory", DEFAULT_BACKUP_DIRECTORY)?
+            .set_default("backups.storage.compression", DEFAULT_BACKUP_COMPRESSION)?
+            .set_default(
+                "backups.storage.compression_level",
+                DEFAULT_BACKUP_COMPRESSION_LEVEL,
+            )?
+            .set_default(
+                "backups.storage.compression_threshold_bytes",
+                DEFAULT_BACKUP_COMPRESSION_THRESHOLD_BYTES,
+            )?
+            .set_default(
+                "backups.retention.lifetime_seconds",
+                DEFAULT_BACKUP_LIFETIME_SECONDS,
+            )?
+            .set_default(
+                "backups.retention.cleanup_interval_seconds",
+                DEFAULT_BACKUP_CLEANUP_INTERVAL_SECONDS,
+            )?
+            .set_default(
+                "backups.retention.cleanup_batch_size",
+                DEFAULT_BACKUP_CLEANUP_BATCH_SIZE,
+            )?
+            .set_default(
+                "backups.retention.max_concurrent_deletions",
+                DEFAULT_BACKUP_MAX_CONCURRENT_DELETIONS,
+            )?
+            .set_default(
+                "backups.retention.operation_lease_seconds",
+                DEFAULT_BACKUP_OPERATION_LEASE_SECONDS,
+            )?
+            .set_default(
+                "backups.retention.stale_preparation_seconds",
+                DEFAULT_BACKUP_STALE_PREPARATION_SECONDS,
+            )?
+            .set_default("backups.diff.enabled", DEFAULT_BACKUP_DIFF_ENABLED)?
+            .set_default(
+                "backups.diff.max_input_size_bytes",
+                DEFAULT_BACKUP_DIFF_MAX_INPUT_SIZE_BYTES,
+            )?
+            .set_default(
+                "backups.diff.generation_timeout_ms",
+                DEFAULT_BACKUP_DIFF_GENERATION_TIMEOUT_MS,
+            )?
             .add_source(File::from(Path::new(DEFAULT_CONFIG_FILE)).required(false));
 
         if let Some(path) = nonempty_env(CONFIG_FILE_ENV) {
@@ -54,6 +121,7 @@ impl AppConfig {
         require_nonempty("mongodb.uri", self.mongodb.uri.expose_secret())?;
         require_nonempty("mongodb.database", &self.mongodb.database)?;
         require_nonempty_path("game_server.storage.root", &self.game_server.storage.root)?;
+        require_nonempty_path("backups.storage.directory", &self.backups.storage.directory)?;
         require_relative_path(
             "configuration.files.configurator_directory",
             &self.configuration.files.configurator_directory,
@@ -107,6 +175,68 @@ impl AppConfig {
             self.maps.upload.max_file_size_bytes,
             MAX_MAP_BATCH_SIZE_BYTES,
         )?;
+        validate_backup_directory(
+            &self.game_server.storage.root,
+            &self.backups.storage.directory,
+        )?;
+        validate_backup_compression(
+            self.backups.storage.compression,
+            self.backups.storage.compression_level,
+        )?;
+        require_range(
+            "backups.storage.compression_threshold_bytes",
+            self.backups.storage.compression_threshold_bytes,
+            0,
+            self.game_server.storage.max_stream_size_bytes,
+        )?;
+        require_range(
+            "backups.retention.lifetime_seconds",
+            self.backups.retention.lifetime_seconds,
+            60 * 60,
+            MAX_BACKUP_LIFETIME_SECONDS,
+        )?;
+        require_range(
+            "backups.retention.cleanup_interval_seconds",
+            self.backups.retention.cleanup_interval_seconds,
+            10,
+            self.backups.retention.lifetime_seconds,
+        )?;
+        require_range(
+            "backups.retention.cleanup_batch_size",
+            self.backups.retention.cleanup_batch_size as u64,
+            1,
+            MAX_BACKUP_CLEANUP_BATCH_SIZE,
+        )?;
+        require_range(
+            "backups.retention.max_concurrent_deletions",
+            self.backups.retention.max_concurrent_deletions as u64,
+            1,
+            MAX_BACKUP_CONCURRENT_DELETIONS,
+        )?;
+        require_range(
+            "backups.retention.operation_lease_seconds",
+            self.backups.retention.operation_lease_seconds,
+            30,
+            MAX_BACKUP_LEASE_SECONDS,
+        )?;
+        require_range(
+            "backups.retention.stale_preparation_seconds",
+            self.backups.retention.stale_preparation_seconds,
+            self.backups.retention.operation_lease_seconds,
+            MAX_BACKUP_STALE_PREPARATION_SECONDS,
+        )?;
+        require_range(
+            "backups.diff.max_input_size_bytes",
+            self.backups.diff.max_input_size_bytes,
+            1,
+            self.game_server.storage.max_stream_size_bytes,
+        )?;
+        require_range(
+            "backups.diff.generation_timeout_ms",
+            self.backups.diff.generation_timeout_ms,
+            10,
+            MAX_BACKUP_DIFF_TIMEOUT_MS,
+        )?;
         Ok(())
     }
 }
@@ -125,6 +255,12 @@ fn log_loaded_configuration(config: &AppConfig) {
         maps_max_files_per_request = config.maps.upload.max_files_per_request,
         maps_max_file_size_bytes = config.maps.upload.max_file_size_bytes,
         maps_max_total_size_bytes = config.maps.upload.max_total_size_bytes,
+        backups_directory = %config.backups.storage.directory.display(),
+        backups_compression = ?config.backups.storage.compression,
+        backups_lifetime_seconds = config.backups.retention.lifetime_seconds,
+        backups_cleanup_interval_seconds = config.backups.retention.cleanup_interval_seconds,
+        backups_diff_enabled = config.backups.diff.enabled,
+        backups_diff_max_input_size_bytes = config.backups.diff.max_input_size_bytes,
         "server configuration loaded"
     );
 }
@@ -267,6 +403,85 @@ fn require_relative_path(key: &'static str, value: &Path) -> Result<(), ConfigEr
     RelativeStoragePath::try_from(value)
         .map(|_| ())
         .map_err(|_| ConfigError::InvalidRelativePath { key })
+}
+
+fn validate_backup_directory(game_root: &Path, backup_root: &Path) -> Result<(), ConfigError> {
+    let game_root = lexical_absolute(game_root)?;
+    let backup_root = lexical_absolute(backup_root)?;
+
+    if path_is_within(&backup_root, &game_root) {
+        return Err(ConfigError::BackupDirectoryInsideGameServerRoot);
+    }
+
+    Ok(())
+}
+
+fn lexical_absolute(path: &Path) -> Result<PathBuf, ConfigError> {
+    let path = if path.is_absolute() {
+        path.to_owned()
+    } else {
+        env::current_dir()
+            .map_err(ConfigError::ResolvePath)?
+            .join(path)
+    };
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if normalized.file_name().is_some() {
+                    normalized.pop();
+                }
+            }
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+
+    Ok(normalized)
+}
+
+fn path_is_within(candidate: &Path, root: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        let candidate = candidate
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        let root = root
+            .to_string_lossy()
+            .replace('\\', "/")
+            .to_ascii_lowercase();
+        candidate == root || candidate.starts_with(&format!("{}/", root.trim_end_matches('/')))
+    }
+
+    #[cfg(not(windows))]
+    {
+        candidate.starts_with(root)
+    }
+}
+
+fn validate_backup_compression(
+    compression: BackupCompression,
+    level: u32,
+) -> Result<(), ConfigError> {
+    let (codec, minimum, maximum) = match compression {
+        BackupCompression::None => ("none", 0, 0),
+        BackupCompression::Gzip => ("gzip", 0, 9),
+    };
+
+    if !(minimum..=maximum).contains(&level) {
+        return Err(ConfigError::InvalidBackupCompressionLevel {
+            codec,
+            level,
+            minimum,
+            maximum,
+        });
+    }
+
+    Ok(())
 }
 
 fn require_range(
@@ -416,6 +631,27 @@ mod tests {
                     max_files_per_request: 50,
                     max_file_size_bytes: 10 * 1024 * 1024,
                     max_total_size_bytes: 50 * 1024 * 1024,
+                },
+            },
+            backups: super::super::model::BackupsConfig {
+                storage: super::super::model::BackupStorageConfig {
+                    directory: "D:/backups".into(),
+                    compression: BackupCompression::Gzip,
+                    compression_level: 1,
+                    compression_threshold_bytes: 1024 * 1024,
+                },
+                retention: super::super::model::BackupRetentionConfig {
+                    lifetime_seconds: DEFAULT_BACKUP_LIFETIME_SECONDS,
+                    cleanup_interval_seconds: DEFAULT_BACKUP_CLEANUP_INTERVAL_SECONDS,
+                    cleanup_batch_size: DEFAULT_BACKUP_CLEANUP_BATCH_SIZE as usize,
+                    max_concurrent_deletions: DEFAULT_BACKUP_MAX_CONCURRENT_DELETIONS as usize,
+                    operation_lease_seconds: DEFAULT_BACKUP_OPERATION_LEASE_SECONDS,
+                    stale_preparation_seconds: DEFAULT_BACKUP_STALE_PREPARATION_SECONDS,
+                },
+                diff: super::super::model::BackupDiffConfig {
+                    enabled: true,
+                    max_input_size_bytes: DEFAULT_BACKUP_DIFF_MAX_INPUT_SIZE_BYTES,
+                    generation_timeout_ms: DEFAULT_BACKUP_DIFF_GENERATION_TIMEOUT_MS,
                 },
             },
         }
@@ -595,6 +831,122 @@ mod tests {
                 Box::new(|config| {
                     config.maps.upload.max_total_size_bytes = MAX_MAP_BATCH_SIZE_BYTES + 1
                 }),
+            ),
+        ];
+
+        for (key, mutate) in cases {
+            let mut config = valid_config();
+            mutate(&mut config);
+
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::ValueOutOfRange { key: invalid_key, .. }) if invalid_key == key
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_backup_storage_inside_the_managed_game_server_root() {
+        for backup_directory in ["D:/servers/openmp", "D:/servers/openmp/backups"] {
+            let mut config = valid_config();
+            config.backups.storage.directory = backup_directory.into();
+
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::BackupDirectoryInsideGameServerRoot)
+            ));
+        }
+
+        #[cfg(windows)]
+        {
+            let mut config = valid_config();
+            config.backups.storage.directory = "D:/SERVERS/OPENMP/BACKUPS".into();
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::BackupDirectoryInsideGameServerRoot)
+            ));
+        }
+
+        let mut sibling = valid_config();
+        sibling.backups.storage.directory = "D:/servers/openmp-backups".into();
+        sibling.validate().unwrap();
+    }
+
+    #[test]
+    fn validates_backup_compression_settings() {
+        let mut invalid_gzip = valid_config();
+        invalid_gzip.backups.storage.compression_level = 10;
+        assert!(matches!(
+            invalid_gzip.validate(),
+            Err(ConfigError::InvalidBackupCompressionLevel {
+                codec: "gzip",
+                level: 10,
+                ..
+            })
+        ));
+
+        let mut invalid_none = valid_config();
+        invalid_none.backups.storage.compression = BackupCompression::None;
+        invalid_none.backups.storage.compression_level = 1;
+        assert!(matches!(
+            invalid_none.validate(),
+            Err(ConfigError::InvalidBackupCompressionLevel {
+                codec: "none",
+                level: 1,
+                ..
+            })
+        ));
+
+        let mut valid_none = valid_config();
+        valid_none.backups.storage.compression = BackupCompression::None;
+        valid_none.backups.storage.compression_level = 0;
+        valid_none.validate().unwrap();
+    }
+
+    #[test]
+    fn validates_backup_retention_and_diff_limits() {
+        let cases: Vec<(&str, ConfigMutation)> = vec![
+            (
+                "backups.storage.compression_threshold_bytes",
+                Box::new(|config| {
+                    config.backups.storage.compression_threshold_bytes =
+                        config.game_server.storage.max_stream_size_bytes + 1
+                }),
+            ),
+            (
+                "backups.retention.lifetime_seconds",
+                Box::new(|config| config.backups.retention.lifetime_seconds = 59),
+            ),
+            (
+                "backups.retention.cleanup_interval_seconds",
+                Box::new(|config| config.backups.retention.cleanup_interval_seconds = 0),
+            ),
+            (
+                "backups.retention.cleanup_batch_size",
+                Box::new(|config| config.backups.retention.cleanup_batch_size = 0),
+            ),
+            (
+                "backups.retention.max_concurrent_deletions",
+                Box::new(|config| config.backups.retention.max_concurrent_deletions = 65),
+            ),
+            (
+                "backups.retention.operation_lease_seconds",
+                Box::new(|config| config.backups.retention.operation_lease_seconds = 29),
+            ),
+            (
+                "backups.retention.stale_preparation_seconds",
+                Box::new(|config| {
+                    config.backups.retention.stale_preparation_seconds =
+                        config.backups.retention.operation_lease_seconds - 1
+                }),
+            ),
+            (
+                "backups.diff.max_input_size_bytes",
+                Box::new(|config| config.backups.diff.max_input_size_bytes = 0),
+            ),
+            (
+                "backups.diff.generation_timeout_ms",
+                Box::new(|config| config.backups.diff.generation_timeout_ms = 60_001),
             ),
         ];
 
@@ -796,6 +1148,25 @@ mod tests {
             max_files_per_request = 50
             max_file_size_bytes = 10485760
             max_total_size_bytes = 52428800
+
+            [backups.storage]
+            directory = "D:/backups"
+            compression = "gzip"
+            compression_level = 1
+            compression_threshold_bytes = 1048576
+
+            [backups.retention]
+            lifetime_seconds = 1209600
+            cleanup_interval_seconds = 3600
+            cleanup_batch_size = 50
+            max_concurrent_deletions = 8
+            operation_lease_seconds = 300
+            stale_preparation_seconds = 1800
+
+            [backups.diff]
+            enabled = true
+            max_input_size_bytes = 10485760
+            generation_timeout_ms = 5000
         "#;
         let environment = Map::from([
             ("LARA_SERVER__BIND_ADDRESS".into(), "0.0.0.0:8080".into()),
@@ -835,6 +1206,18 @@ mod tests {
             (
                 "LARA_MAPS__UPLOAD__MAX_TOTAL_SIZE_BYTES".into(),
                 "26214400".into(),
+            ),
+            (
+                "LARA_BACKUPS__STORAGE__DIRECTORY".into(),
+                "D:/custom-backups".into(),
+            ),
+            (
+                "LARA_BACKUPS__RETENTION__LIFETIME_SECONDS".into(),
+                "604800".into(),
+            ),
+            (
+                "LARA_BACKUPS__DIFF__GENERATION_TIMEOUT_MS".into(),
+                "2500".into(),
             ),
         ]);
 
@@ -878,6 +1261,12 @@ mod tests {
         assert_eq!(config.maps.upload.max_files_per_request, 25);
         assert_eq!(config.maps.upload.max_file_size_bytes, 5_242_880);
         assert_eq!(config.maps.upload.max_total_size_bytes, 26_214_400);
+        assert_eq!(
+            config.backups.storage.directory,
+            std::path::PathBuf::from("D:/custom-backups")
+        );
+        assert_eq!(config.backups.retention.lifetime_seconds, 604_800);
+        assert_eq!(config.backups.diff.generation_timeout_ms, 2_500);
     }
 
     #[test]

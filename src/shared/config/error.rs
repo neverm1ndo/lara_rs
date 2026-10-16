@@ -30,4 +30,17 @@ pub enum ConfigError {
     DuplicateIgnoredPath { path: String },
     #[error("unsupported fallback text encoding `{encoding}`")]
     UnsupportedTextEncoding { encoding: String },
+    #[error("backup storage directory must not be inside the managed game-server root")]
+    BackupDirectoryInsideGameServerRoot,
+    #[error(
+        "backup compression level {level} is invalid for `{codec}`; expected {minimum}–{maximum}"
+    )]
+    InvalidBackupCompressionLevel {
+        codec: &'static str,
+        level: u32,
+        minimum: u32,
+        maximum: u32,
+    },
+    #[error("failed to resolve configured filesystem paths")]
+    ResolvePath(#[source] std::io::Error),
 }
