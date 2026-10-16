@@ -9,7 +9,7 @@ description = "Liberty Admin Realtime Analytics"
 [package.metadata.deb]
 maintainer = "neverm1ndo <it@nmnd.ru>"
 copyright = "2026 neverm1ndo"
-license-file = ["LICENSE", "4"]
+license-file = ["LICENSE.md", "4"]
 extended-description = """\
 A longer, multi-line description of the application \
 that explains what it does in detail.\
