@@ -5,5 +5,5 @@ mod model;
 #[allow(unused_imports)]
 pub use model::{
     Backup, BackupAction, BackupDiff, BackupDiffSkipReason, BackupId, BackupInitiatorId,
-    BackupSnapshot, BackupSource, BackupState, InvalidBackup, SnapshotCompression,
+    BackupSnapshot, BackupSource, BackupState, BackupVersion, InvalidBackup, SnapshotCompression,
 };

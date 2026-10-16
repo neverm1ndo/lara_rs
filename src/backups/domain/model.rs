@@ -65,6 +65,30 @@ impl BackupInitiatorId {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BackupVersion(u64);
+
+impl BackupVersion {
+    pub const fn initial() -> Self {
+        Self(0)
+    }
+
+    pub const fn from_value(value: u64) -> Self {
+        Self(value)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    fn next(self) -> Result<Self, InvalidBackup> {
+        self.0
+            .checked_add(1)
+            .map(Self)
+            .ok_or(InvalidBackup::VersionOverflow)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackupSource {
     namespace: StorageNamespace,
@@ -229,6 +253,7 @@ pub struct Backup {
     state: BackupState,
     snapshot: Option<BackupSnapshot>,
     diff: Option<BackupDiff>,
+    version: BackupVersion,
 }
 
 impl Backup {
@@ -263,6 +288,7 @@ impl Backup {
             state: BackupState::Preparing { lease_expires_at },
             snapshot: None,
             diff: None,
+            version: BackupVersion::initial(),
         })
     }
 
@@ -283,9 +309,11 @@ impl Backup {
             return Err(InvalidBackup::BinaryDiff);
         }
 
+        let version = self.version.next()?;
         self.snapshot = Some(snapshot);
         self.diff = Some(diff);
         self.state = BackupState::Available;
+        self.version = version;
         Ok(())
     }
 
@@ -293,6 +321,7 @@ impl Backup {
         if !matches!(self.state, BackupState::Preparing { .. }) {
             return Err(InvalidBackup::StateTransition);
         }
+        self.version = self.version.next()?;
         self.state = BackupState::PreparationFailed;
         Ok(())
     }
@@ -303,6 +332,7 @@ impl Backup {
         lease_expires_at: DateTime<Utc>,
     ) -> Result<(), InvalidBackup> {
         self.ensure_available_operation(now, lease_expires_at)?;
+        self.version = self.version.next()?;
         self.state = BackupState::Restoring { lease_expires_at };
         Ok(())
     }
@@ -319,6 +349,7 @@ impl Backup {
             return Err(InvalidBackup::StateTransition);
         }
         validate_operation_lease(now, lease_expires_at)?;
+        self.version = self.version.next()?;
         self.state = BackupState::Deleting { lease_expires_at };
         Ok(())
     }
@@ -330,6 +361,7 @@ impl Backup {
         ) {
             return Err(InvalidBackup::StateTransition);
         }
+        self.version = self.version.next()?;
         self.state = if self.snapshot.is_some() {
             BackupState::Available
         } else {
@@ -396,6 +428,10 @@ impl Backup {
         self.diff.as_ref()
     }
 
+    pub const fn version(&self) -> BackupVersion {
+        self.version
+    }
+
     pub fn is_expired(&self, now: DateTime<Utc>) -> bool {
         self.expires_at <= now
     }
@@ -442,6 +478,8 @@ pub enum InvalidBackup {
     StateTransition,
     #[error("expired backup cannot be restored")]
     Expired,
+    #[error("backup aggregate version overflowed")]
+    VersionOverflow,
 }
 
 #[cfg(test)]
@@ -536,6 +574,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(backup.state(), BackupState::Available);
+        assert_eq!(backup.version().get(), 1);
         assert_eq!(backup.snapshot(), Some(&snapshot));
         assert!(matches!(backup.diff(), Some(BackupDiff::DiffMatchPatch(_))));
         assert_eq!(backup.initiated_by().get(), 42);
@@ -604,6 +643,7 @@ mod tests {
         let lease = now() + Duration::minutes(5);
 
         backup.begin_restore(now(), lease).unwrap();
+        assert_eq!(backup.version().get(), 2);
         assert_eq!(
             backup.begin_deletion(now(), lease),
             Err(InvalidBackup::StateTransition)
@@ -613,6 +653,7 @@ mod tests {
         backup.begin_deletion(now(), lease).unwrap();
         backup.release_operation().unwrap();
         assert_eq!(backup.state(), BackupState::Available);
+        assert_eq!(backup.version().get(), 5);
     }
 
     #[test]
