@@ -23,15 +23,34 @@ pub struct LocalMapsFileService {
     storage: LocalFileStorage,
     coordinator: FileMutationCoordinator,
     namespace: StorageNamespace,
+    destructive_backup_requirement: BackupRequirement,
 }
 
 impl LocalMapsFileService {
     pub fn new(storage: LocalFileStorage, before_mutation: Arc<dyn BeforeFileMutation>) -> Self {
+        Self::with_backup_requirement(storage, before_mutation, BackupRequirement::Optional)
+    }
+
+    /// Production constructor used once the backups provider is available.
+    /// Overwrite and delete fail closed if preserving the current map fails.
+    pub fn with_required_backups(
+        storage: LocalFileStorage,
+        before_mutation: Arc<dyn BeforeFileMutation>,
+    ) -> Self {
+        Self::with_backup_requirement(storage, before_mutation, BackupRequirement::Required)
+    }
+
+    fn with_backup_requirement(
+        storage: LocalFileStorage,
+        before_mutation: Arc<dyn BeforeFileMutation>,
+        destructive_backup_requirement: BackupRequirement,
+    ) -> Self {
         Self {
             coordinator: FileMutationCoordinator::new(storage.clone(), before_mutation),
             storage,
             namespace: StorageNamespace::new(MAPS_STORAGE_NAMESPACE)
                 .expect("maps storage namespace is a valid constant"),
+            destructive_backup_requirement,
         }
     }
 
@@ -134,7 +153,7 @@ impl MapsFileService for LocalMapsFileService {
                         &context,
                         request,
                         FileMutationPayload::Content(content),
-                        BackupRequirement::Optional,
+                        self.destructive_backup_requirement,
                     )
                     .await?,
                 );
@@ -160,7 +179,7 @@ impl MapsFileService for LocalMapsFileService {
                 &context,
                 request,
                 FileMutationPayload::None,
-                BackupRequirement::Optional,
+                self.destructive_backup_requirement,
             )
             .await
         })
@@ -327,6 +346,16 @@ mod tests {
         LocalMapsFileService::new(storage, Arc::new(NoBackupProvider))
     }
 
+    async fn service_with_required_backups(directory: &TestDirectory) -> LocalMapsFileService {
+        let storage = LocalFileStorage::open(
+            &directory.0,
+            FileStorageLimits::new(8, 100, 1024 * 1024).unwrap(),
+        )
+        .await
+        .unwrap();
+        LocalMapsFileService::with_required_backups(storage, Arc::new(NoBackupProvider))
+    }
+
     #[tokio::test]
     async fn tree_only_contains_map_files_and_their_parent_directories() {
         let directory = TestDirectory::new();
@@ -401,6 +430,20 @@ mod tests {
             fs::read(directory.0.join("city").join("two.map.off")).unwrap(),
             b"changed-2"
         );
+    }
+
+    #[tokio::test]
+    async fn required_backup_failure_preserves_existing_map_bytes() {
+        let directory = TestDirectory::new();
+        fs::write(directory.0.join("race.map"), b"original").unwrap();
+        let service = service_with_required_backups(&directory).await;
+
+        let result = service
+            .overwrite_many(context(), batch(&[("race.map", b"replacement")]))
+            .await;
+
+        assert!(matches!(result, Err(MapsFileServiceError::Unavailable)));
+        assert_eq!(fs::read(directory.0.join("race.map")).unwrap(), b"original");
     }
 
     #[tokio::test]

@@ -5,6 +5,7 @@ use crate::auth::{
     presentation::{extractors::JwtExtractorState, state::LoginState},
 };
 use crate::{
+    backups::{application::lifecycle::BackupLifecycleService, presentation::state::BackupsState},
     configuration::presentation::authorization::ConfigurationAuthorizationState,
     maps::{application::file_service::MapsFileService, presentation::state::MapsState},
     shared::file_storage::{path::RelativeStoragePath, upload::MultipartUploadLimits},
@@ -17,6 +18,7 @@ pub struct AppState {
     configurator_directory: RelativeStoragePath,
     maps_file_service: Arc<dyn MapsFileService>,
     maps_upload_limits: MultipartUploadLimits,
+    backup_lifecycle_service: Arc<BackupLifecycleService>,
 }
 
 impl AppState {
@@ -26,6 +28,7 @@ impl AppState {
         configurator_directory: RelativeStoragePath,
         maps_file_service: impl MapsFileService + 'static,
         maps_upload_limits: MultipartUploadLimits,
+        backup_lifecycle_service: Arc<BackupLifecycleService>,
     ) -> Self {
         Self {
             jwt_authenticator: Arc::new(authenticator),
@@ -33,7 +36,14 @@ impl AppState {
             configurator_directory,
             maps_file_service: Arc::new(maps_file_service),
             maps_upload_limits,
+            backup_lifecycle_service,
         }
+    }
+}
+
+impl BackupsState for AppState {
+    fn backup_lifecycle_service(&self) -> Arc<BackupLifecycleService> {
+        Arc::clone(&self.backup_lifecycle_service)
     }
 }
 

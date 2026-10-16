@@ -131,6 +131,8 @@ fn decode_text(content: &[u8], fallback: &'static Encoding) -> Option<String> {
         (UTF_16LE, content, false)
     } else if let Some(content) = content.strip_prefix(UTF16_BE_BOM) {
         (UTF_16BE, content, false)
+    } else if std::str::from_utf8(content).is_ok() {
+        (UTF_8, content, false)
     } else {
         (fallback, content, true)
     };
@@ -231,6 +233,25 @@ mod tests {
             .unwrap();
         assert_eq!(actual, "hostname Новый сервер\r\n");
         assert!(applied.iter().all(|applied| *applied));
+    }
+
+    #[tokio::test]
+    async fn detects_utf8_without_bom_before_using_legacy_fallback() {
+        let before = "<map name=\"Старая\"/>".as_bytes();
+        let after = "<map name=\"Новая\"/>".as_bytes();
+
+        let BackupDiff::DiffMatchPatch(patch_text) =
+            generate(&generator(), FileContentKind::Text, before, Some(after)).await
+        else {
+            panic!("UTF-8 diff was unexpectedly skipped");
+        };
+
+        let dmp = DiffMatchPatch::new();
+        let patches = dmp.patch_from_text::<Compat>(&patch_text).unwrap();
+        let (actual, applied) = dmp.patch_apply(&patches, "<map name=\"Старая\"/>").unwrap();
+
+        assert_eq!(actual, "<map name=\"Новая\"/>");
+        assert!(applied.into_iter().all(|value| value));
     }
 
     #[tokio::test]
