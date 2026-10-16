@@ -140,6 +140,20 @@ impl BackupRepository for MongoBackupRepository {
         })
     }
 
+    fn find_by_mutation_id<'a>(
+        &'a self,
+        mutation_id: MutationId,
+    ) -> BackupRepositoryFuture<'a, Option<Backup>> {
+        Box::pin(async move {
+            self.backups
+                .find_one(doc! { "mutation_id": mutation_id.to_string() })
+                .await
+                .map_err(database_error)?
+                .map(Backup::try_from)
+                .transpose()
+        })
+    }
+
     fn list<'a>(&'a self, query: BackupListQuery) -> BackupRepositoryFuture<'a, Vec<Backup>> {
         Box::pin(async move {
             let visible = doc! { "state.kind": { "$in": ["available", "restoring"] } };
@@ -374,6 +388,7 @@ enum DiffSkipReasonDocument {
     InputTooLarge,
     UnsupportedEncoding,
     GenerationTimedOut,
+    GenerationFailed,
 }
 
 impl TryFrom<&Backup> for BackupDocument {
@@ -653,6 +668,7 @@ impl From<BackupDiffSkipReason> for DiffSkipReasonDocument {
             BackupDiffSkipReason::InputTooLarge => Self::InputTooLarge,
             BackupDiffSkipReason::UnsupportedEncoding => Self::UnsupportedEncoding,
             BackupDiffSkipReason::GenerationTimedOut => Self::GenerationTimedOut,
+            BackupDiffSkipReason::GenerationFailed => Self::GenerationFailed,
         }
     }
 }
@@ -665,6 +681,7 @@ impl From<DiffSkipReasonDocument> for BackupDiffSkipReason {
             DiffSkipReasonDocument::InputTooLarge => Self::InputTooLarge,
             DiffSkipReasonDocument::UnsupportedEncoding => Self::UnsupportedEncoding,
             DiffSkipReasonDocument::GenerationTimedOut => Self::GenerationTimedOut,
+            DiffSkipReasonDocument::GenerationFailed => Self::GenerationFailed,
         }
     }
 }

@@ -209,6 +209,7 @@ pub enum BackupDiffSkipReason {
     InputTooLarge,
     UnsupportedEncoding,
     GenerationTimedOut,
+    GenerationFailed,
 }
 
 /// Pre-calculated Diff Match Patch text or an explicit reason why generating

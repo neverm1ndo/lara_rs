@@ -25,6 +25,11 @@ pub trait BackupRepository: Send + Sync {
 
     fn find_by_id<'a>(&'a self, backup_id: BackupId) -> BackupRepositoryFuture<'a, Option<Backup>>;
 
+    fn find_by_mutation_id<'a>(
+        &'a self,
+        mutation_id: crate::shared::file_storage::mutation::MutationId,
+    ) -> BackupRepositoryFuture<'a, Option<Backup>>;
+
     fn list<'a>(&'a self, query: BackupListQuery) -> BackupRepositoryFuture<'a, Vec<Backup>>;
 
     fn find_expired<'a>(
