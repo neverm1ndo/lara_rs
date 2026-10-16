@@ -292,6 +292,72 @@ impl Backup {
         })
     }
 
+    /// Reconstitutes a persisted aggregate while enforcing the same
+    /// invariants as live state transitions. Infrastructure adapters must use
+    /// this constructor instead of bypassing private fields.
+    #[allow(clippy::too_many_arguments)]
+    pub fn rehydrate(
+        id: BackupId,
+        mutation_id: MutationId,
+        source: BackupSource,
+        action: BackupAction,
+        initiated_by: BackupInitiatorId,
+        source_revision: FileRevision,
+        created_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+        state: BackupState,
+        snapshot: Option<BackupSnapshot>,
+        diff: Option<BackupDiff>,
+        version: BackupVersion,
+    ) -> Result<Self, InvalidBackup> {
+        if expires_at <= created_at {
+            return Err(InvalidBackup::Expiration);
+        }
+        if state
+            .lease_expires_at()
+            .is_some_and(|lease| lease <= created_at)
+        {
+            return Err(InvalidBackup::Lease);
+        }
+        if matches!(state, BackupState::Preparing { .. })
+            && state
+                .lease_expires_at()
+                .is_some_and(|lease| lease > expires_at)
+        {
+            return Err(InvalidBackup::Lease);
+        }
+
+        let has_material = snapshot.is_some() && diff.is_some();
+        let has_no_material = snapshot.is_none() && diff.is_none();
+        let valid_shape = match state {
+            BackupState::Preparing { .. } | BackupState::PreparationFailed => has_no_material,
+            BackupState::Available | BackupState::Restoring { .. } => has_material,
+            BackupState::Deleting { .. } => has_material || has_no_material,
+        };
+        if !valid_shape {
+            return Err(InvalidBackup::PersistedState);
+        }
+
+        if let (Some(snapshot), Some(diff)) = (&snapshot, &diff) {
+            validate_snapshot_material(&source_revision, snapshot, diff)?;
+        }
+
+        Ok(Self {
+            id,
+            mutation_id,
+            source,
+            action,
+            initiated_by,
+            source_revision,
+            created_at,
+            expires_at,
+            state,
+            snapshot,
+            diff,
+            version,
+        })
+    }
+
     pub fn mark_available(
         &mut self,
         snapshot: BackupSnapshot,
@@ -300,14 +366,7 @@ impl Backup {
         if !matches!(self.state, BackupState::Preparing { .. }) {
             return Err(InvalidBackup::StateTransition);
         }
-        if snapshot.source_revision() != &self.source_revision {
-            return Err(InvalidBackup::SnapshotRevisionMismatch);
-        }
-        if snapshot.content_kind() == FileContentKind::Binary
-            && matches!(diff, BackupDiff::DiffMatchPatch(_))
-        {
-            return Err(InvalidBackup::BinaryDiff);
-        }
+        validate_snapshot_material(&self.source_revision, &snapshot, &diff)?;
 
         let version = self.version.next()?;
         self.snapshot = Some(snapshot);
@@ -443,6 +502,22 @@ impl Backup {
     }
 }
 
+fn validate_snapshot_material(
+    source_revision: &FileRevision,
+    snapshot: &BackupSnapshot,
+    diff: &BackupDiff,
+) -> Result<(), InvalidBackup> {
+    if snapshot.source_revision() != source_revision {
+        return Err(InvalidBackup::SnapshotRevisionMismatch);
+    }
+    if snapshot.content_kind() == FileContentKind::Binary
+        && matches!(diff, BackupDiff::DiffMatchPatch(_))
+    {
+        return Err(InvalidBackup::BinaryDiff);
+    }
+    Ok(())
+}
+
 fn validate_operation_lease(
     now: DateTime<Utc>,
     lease_expires_at: DateTime<Utc>,
@@ -476,6 +551,8 @@ pub enum InvalidBackup {
     BinaryDiff,
     #[error("backup state transition is not allowed")]
     StateTransition,
+    #[error("persisted backup state is inconsistent with its snapshot or diff")]
+    PersistedState,
     #[error("expired backup cannot be restored")]
     Expired,
     #[error("backup aggregate version overflowed")]
@@ -687,6 +764,29 @@ mod tests {
                 now() + Duration::days(14) + Duration::minutes(5),
             ),
             Err(InvalidBackup::Expired)
+        );
+    }
+
+    #[test]
+    fn rehydration_rejects_inconsistent_persisted_state() {
+        let backup = prepared();
+
+        assert_eq!(
+            Backup::rehydrate(
+                backup.id(),
+                backup.mutation_id(),
+                backup.source().clone(),
+                backup.action(),
+                backup.initiated_by(),
+                backup.source_revision().clone(),
+                backup.created_at(),
+                backup.expires_at(),
+                BackupState::Available,
+                None,
+                None,
+                BackupVersion::from_value(4),
+            ),
+            Err(InvalidBackup::PersistedState)
         );
     }
 }

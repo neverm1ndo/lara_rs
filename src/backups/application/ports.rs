@@ -39,6 +39,12 @@ pub trait BackupRepository: Send + Sync {
         limit: usize,
     ) -> BackupRepositoryFuture<'a, Vec<Backup>>;
 
+    fn find_stale_operations<'a>(
+        &'a self,
+        lease_expired_at_or_before: DateTime<Utc>,
+        limit: usize,
+    ) -> BackupRepositoryFuture<'a, Vec<Backup>>;
+
     fn save<'a>(
         &'a self,
         backup: &'a Backup,
