@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 
 use super::{
-    mutation::{FileMutationRequest, FileRevision, MutationId},
+    mutation::{FileMutationOperation, FileMutationRequest, FileRevision, MutationId},
     path::RelativeStoragePath,
 };
 
@@ -189,17 +189,103 @@ pub trait FileSnapshotSource: Send + Sync {
     fn read_verified<'a>(&'a self, snapshot: &'a FileSnapshot) -> ReadFileSnapshotFuture<'a>;
 }
 
+/// Describes what the mutation will do with the file content.
+///
+/// The replacement bytes are borrowed from the already validated mutation
+/// payload. They are never transcoded or copied by the coordinator, so a
+/// backup provider can calculate a diff against the exact bytes that will be
+/// written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileContentMutation<'a> {
+    Create(&'a [u8]),
+    Replace(&'a [u8]),
+    Preserve,
+    Remove,
+}
+
+impl<'a> FileContentMutation<'a> {
+    pub const fn replacement(self) -> Option<&'a [u8]> {
+        match self {
+            Self::Create(content) | Self::Replace(content) => Some(content),
+            Self::Preserve | Self::Remove => None,
+        }
+    }
+}
+
+/// Capability-safe description of a mutation at the last point before it is
+/// applied to the filesystem.
+///
+/// This is the shared cross-domain contract used by a future backups bounded
+/// context. It exposes neither an absolute path nor a concrete storage
+/// implementation. Existing content can only be read through the verified
+/// snapshot capability.
+pub struct FileMutationIntent<'a> {
+    request: &'a FileMutationRequest,
+    current_file: Option<&'a FileSnapshot>,
+    snapshot_source: &'a dyn FileSnapshotSource,
+    content: FileContentMutation<'a>,
+    backup_requirement: BackupRequirement,
+}
+
+impl<'a> FileMutationIntent<'a> {
+    pub(crate) fn new(
+        request: &'a FileMutationRequest,
+        current_file: Option<&'a FileSnapshot>,
+        snapshot_source: &'a dyn FileSnapshotSource,
+        replacement: Option<&'a [u8]>,
+        backup_requirement: BackupRequirement,
+    ) -> Self {
+        let content = match request.operation() {
+            FileMutationOperation::Create { .. } => FileContentMutation::Create(
+                replacement.expect("validated create mutation has replacement content"),
+            ),
+            FileMutationOperation::Overwrite { .. } => FileContentMutation::Replace(
+                replacement.expect("validated overwrite mutation has replacement content"),
+            ),
+            FileMutationOperation::Delete { .. } => FileContentMutation::Remove,
+            FileMutationOperation::Rename { .. } => FileContentMutation::Preserve,
+        };
+
+        Self {
+            request,
+            current_file,
+            snapshot_source,
+            content,
+            backup_requirement,
+        }
+    }
+
+    pub const fn request(&self) -> &FileMutationRequest {
+        self.request
+    }
+
+    pub const fn current_file(&self) -> Option<&FileSnapshot> {
+        self.current_file
+    }
+
+    pub const fn content(&self) -> FileContentMutation<'a> {
+        self.content
+    }
+
+    pub const fn backup_requirement(&self) -> BackupRequirement {
+        self.backup_requirement
+    }
+
+    /// Reads the exact current bytes only if the observed revision is still
+    /// valid. Create mutations return `Ok(None)` because no source exists.
+    pub async fn read_current(&self) -> Result<Option<Vec<u8>>, ReadFileSnapshotError> {
+        match self.current_file {
+            Some(snapshot) => self.snapshot_source.read_verified(snapshot).await.map(Some),
+            None => Ok(None),
+        }
+    }
+}
+
 /// Synchronous-in-the-workflow guard invoked before a filesystem mutation.
 /// Implementations may persist a backup and must not return until it is safe to
 /// continue.
 pub trait BeforeFileMutation: Send + Sync {
-    fn prepare<'a>(
-        &'a self,
-        request: &'a FileMutationRequest,
-        current_file: Option<&'a FileSnapshot>,
-        snapshot_source: &'a dyn FileSnapshotSource,
-        requirement: BackupRequirement,
-    ) -> BeforeMutationFuture<'a>;
+    fn prepare<'a>(&'a self, intent: FileMutationIntent<'a>) -> BeforeMutationFuture<'a>;
 }
 
 /// Explicit fallback used before a backup provider is configured. It never
@@ -208,19 +294,19 @@ pub trait BeforeFileMutation: Send + Sync {
 pub struct NoBackupProvider;
 
 impl BeforeFileMutation for NoBackupProvider {
-    fn prepare<'a>(
-        &'a self,
-        request: &'a FileMutationRequest,
-        current_file: Option<&'a FileSnapshot>,
-        _snapshot_source: &'a dyn FileSnapshotSource,
-        requirement: BackupRequirement,
-    ) -> BeforeMutationFuture<'a> {
+    fn prepare<'a>(&'a self, intent: FileMutationIntent<'a>) -> BeforeMutationFuture<'a> {
         Box::pin(async move {
-            if requirement.is_required() {
+            if intent.backup_requirement().is_required() {
                 return Err(BeforeFileMutationError::RequiredBackupUnavailable);
             }
 
-            MutationPermit::new(request, current_file, None, requirement).map_err(Into::into)
+            MutationPermit::new(
+                intent.request(),
+                intent.current_file(),
+                None,
+                intent.backup_requirement(),
+            )
+            .map_err(Into::into)
         })
     }
 }
@@ -470,29 +556,63 @@ mod tests {
         let snapshot = FileSnapshot::new(path("server.cfg"), revision(1_700_000_000)).unwrap();
 
         for requirement in [BackupRequirement::Disabled, BackupRequirement::Optional] {
-            let permit = NoBackupProvider
-                .prepare(
-                    &request,
-                    Some(&snapshot),
-                    &UnusedSnapshotSource,
-                    requirement,
-                )
-                .await
-                .unwrap();
+            let intent = FileMutationIntent::new(
+                &request,
+                Some(&snapshot),
+                &UnusedSnapshotSource,
+                None,
+                requirement,
+            );
+            let permit = NoBackupProvider.prepare(intent).await.unwrap();
             assert!(permit.backup_receipt().is_none());
         }
 
+        let required = FileMutationIntent::new(
+            &request,
+            Some(&snapshot),
+            &UnusedSnapshotSource,
+            None,
+            BackupRequirement::Required,
+        );
         assert!(matches!(
-            NoBackupProvider
-                .prepare(
-                    &request,
-                    Some(&snapshot),
-                    &UnusedSnapshotSource,
-                    BackupRequirement::Required,
-                )
-                .await,
+            NoBackupProvider.prepare(required).await,
             Err(BeforeFileMutationError::RequiredBackupUnavailable)
         ));
+    }
+
+    #[tokio::test]
+    async fn mutation_intent_exposes_opaque_replacement_and_verified_current_bytes() {
+        struct SnapshotSource;
+
+        impl FileSnapshotSource for SnapshotSource {
+            fn read_verified<'a>(
+                &'a self,
+                _snapshot: &'a FileSnapshot,
+            ) -> ReadFileSnapshotFuture<'a> {
+                Box::pin(async { Ok(vec![0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2]) })
+            }
+        }
+
+        let request =
+            FileMutationRequest::overwrite(namespace(), actor(), path("server.cfg"), None).unwrap();
+        let snapshot = FileSnapshot::new(path("server.cfg"), revision(1_700_000_000)).unwrap();
+        let replacement = [0xd2, 0xe5, 0xf1, 0xf2];
+        let intent = FileMutationIntent::new(
+            &request,
+            Some(&snapshot),
+            &SnapshotSource,
+            Some(&replacement),
+            BackupRequirement::Required,
+        );
+
+        assert_eq!(intent.content(), FileContentMutation::Replace(&replacement));
+        assert_eq!(intent.content().replacement(), Some(replacement.as_slice()));
+        assert_eq!(
+            intent.read_current().await.unwrap(),
+            Some(vec![0xcf, 0xf0, 0xe8, 0xe2, 0xe5, 0xf2])
+        );
+        assert_eq!(intent.request().namespace().as_str(), "configuration");
+        assert_eq!(intent.backup_requirement(), BackupRequirement::Required);
     }
 
     #[test]

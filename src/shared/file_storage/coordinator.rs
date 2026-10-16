@@ -6,8 +6,8 @@ use thiserror::Error;
 use super::{
     event::FileChanged,
     guard::{
-        BackupRequirement, BeforeFileMutation, BeforeFileMutationError, FileSnapshot,
-        InvalidMutationPermit, MutationPermit,
+        BackupRequirement, BeforeFileMutation, BeforeFileMutationError, FileMutationIntent,
+        FileSnapshot, InvalidMutationPermit, MutationPermit,
     },
     local::{LocalFileStorage, LocalFileStorageError},
     mutation::{FileMutationOperation, FileMutationRequest, FileRevision},
@@ -57,15 +57,14 @@ impl FileMutationCoordinator {
         )?;
 
         let initial_snapshot = self.snapshot_for(request.operation()).await?;
-        let permit = self
-            .before_mutation
-            .prepare(
-                request,
-                initial_snapshot.as_ref(),
-                &self.storage,
-                backup_requirement,
-            )
-            .await?;
+        let intent = FileMutationIntent::new(
+            request,
+            initial_snapshot.as_ref(),
+            &self.storage,
+            payload.content(),
+            backup_requirement,
+        );
+        let permit = self.before_mutation.prepare(intent).await?;
 
         if permit.mutation_id() != request.mutation_id() {
             return Err(FileMutationCoordinatorError::InvalidPermit(
@@ -216,7 +215,7 @@ mod tests {
 
     use super::*;
     use crate::shared::file_storage::{
-        guard::{BackupReceipt, BeforeMutationFuture, FileSnapshotSource, NoBackupProvider},
+        guard::{BackupReceipt, BeforeMutationFuture, NoBackupProvider},
         local::FileStorageLimits,
         mutation::{MutationActor, StorageNamespace},
         path::RelativeStoragePath,
@@ -355,34 +354,38 @@ mod tests {
     struct ReceiptGuard;
 
     impl BeforeFileMutation for ReceiptGuard {
-        fn prepare<'a>(
-            &'a self,
-            request: &'a FileMutationRequest,
-            current_file: Option<&'a FileSnapshot>,
-            snapshot_source: &'a dyn FileSnapshotSource,
-            requirement: BackupRequirement,
-        ) -> BeforeMutationFuture<'a> {
+        fn prepare<'a>(&'a self, intent: FileMutationIntent<'a>) -> BeforeMutationFuture<'a> {
             Box::pin(async move {
-                let snapshot = current_file.expect("overwrite has a source snapshot");
-                let content = snapshot_source
-                    .read_verified(snapshot)
+                let snapshot = intent
+                    .current_file()
+                    .expect("overwrite has a source snapshot");
+                let content = intent
+                    .read_current()
                     .await
                     .map_err(|error| BeforeFileMutationError::Rejected {
                         reason: error.to_string(),
-                    })?;
-                if content != b"original" {
+                    })?
+                    .expect("overwrite has current content");
+                if content != b"original"
+                    || intent.content().replacement() != Some(b"changed".as_slice())
+                {
                     return Err(BeforeFileMutationError::Rejected {
-                        reason: "snapshot content mismatch".into(),
+                        reason: "mutation content mismatch".into(),
                     });
                 }
                 let receipt = BackupReceipt::new(
-                    request.mutation_id(),
+                    intent.request().mutation_id(),
                     "backup-1",
                     snapshot.revision().clone(),
                     Utc::now(),
                 )?;
-                MutationPermit::new(request, current_file, Some(receipt), requirement)
-                    .map_err(Into::into)
+                MutationPermit::new(
+                    intent.request(),
+                    intent.current_file(),
+                    Some(receipt),
+                    intent.backup_requirement(),
+                )
+                .map_err(Into::into)
             })
         }
     }
@@ -441,15 +444,14 @@ mod tests {
     }
 
     impl BeforeFileMutation for MutatingGuard {
-        fn prepare<'a>(
-            &'a self,
-            request: &'a FileMutationRequest,
-            current_file: Option<&'a FileSnapshot>,
-            _snapshot_source: &'a dyn FileSnapshotSource,
-            requirement: BackupRequirement,
-        ) -> BeforeMutationFuture<'a> {
+        fn prepare<'a>(&'a self, intent: FileMutationIntent<'a>) -> BeforeMutationFuture<'a> {
             Box::pin(async move {
-                let permit = MutationPermit::new(request, current_file, None, requirement)?;
+                let permit = MutationPermit::new(
+                    intent.request(),
+                    intent.current_file(),
+                    None,
+                    intent.backup_requirement(),
+                )?;
                 tokio::fs::write(&self.absolute_path, b"raced")
                     .await
                     .unwrap();

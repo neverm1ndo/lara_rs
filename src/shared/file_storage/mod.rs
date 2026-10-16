@@ -1,3 +1,4 @@
+pub mod content;
 pub mod coordinator;
 pub mod event;
 pub mod guard;
