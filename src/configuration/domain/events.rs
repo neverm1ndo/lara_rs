@@ -373,7 +373,7 @@ mod tests {
 
         for (storage, expected) in cases {
             let event =
-                ConfigurationFileChanged::from_storage(&storage, &access(UserRole::DEVELOPER))
+                ConfigurationFileChanged::from_storage(&storage, &access(UserRole::Developer))
                     .unwrap();
 
             assert_eq!(event.change(), &expected);
@@ -394,7 +394,7 @@ mod tests {
         );
 
         let event =
-            ConfigurationFileChanged::from_storage(&storage, &access(UserRole::CONFIGURATOR))
+            ConfigurationFileChanged::from_storage(&storage, &access(UserRole::Configurator))
                 .unwrap();
 
         assert_eq!(
@@ -417,7 +417,7 @@ mod tests {
             None,
         );
         assert_eq!(
-            ConfigurationFileChanged::from_storage(&other_context, &access(UserRole::DEVELOPER)),
+            ConfigurationFileChanged::from_storage(&other_context, &access(UserRole::Developer)),
             Err(InvalidConfigurationDomainEvent::UnexpectedNamespace)
         );
 
@@ -430,7 +430,7 @@ mod tests {
             Some(revision(1_700_000_100)),
         );
         assert_eq!(
-            ConfigurationFileChanged::from_storage(&malformed, &access(UserRole::DEVELOPER)),
+            ConfigurationFileChanged::from_storage(&malformed, &access(UserRole::Developer)),
             Err(InvalidConfigurationDomainEvent::MalformedStorageEvent)
         );
     }
@@ -446,7 +446,7 @@ mod tests {
             Some(revision(1_700_000_100)),
         );
         let changed =
-            ConfigurationFileChanged::from_storage(&storage, &access(UserRole::DEVELOPER)).unwrap();
+            ConfigurationFileChanged::from_storage(&storage, &access(UserRole::Developer)).unwrap();
         let expected_id = changed.event_id();
         let expected_time = changed.occurred_at();
         let event = ConfigurationDomainEvent::from(changed);

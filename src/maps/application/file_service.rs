@@ -216,7 +216,7 @@ mod tests {
 
     #[test]
     fn request_context_preserves_access_and_actor() {
-        let access = MapAccess::authorize(UserRole::MAPPER, &[]).unwrap();
+        let access = MapAccess::authorize(UserRole::Mapper, &[]).unwrap();
         let actor = MutationActor::new("42", Some("session-1".into())).unwrap();
         let context = MapsRequestContext::new(access, actor.clone());
 

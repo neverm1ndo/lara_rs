@@ -50,8 +50,8 @@ mod tests {
                 UserId::new(42).unwrap(),
                 "neo",
                 Some("neo.png".into()),
-                UserRole::ADMIN,
-                vec![UserRole::CHALLENGER, UserRole::ADMIN],
+                UserRole::Admin,
+                vec![UserRole::Challenger, UserRole::Admin],
             )
             .unwrap(),
         );

@@ -321,7 +321,7 @@ mod tests {
 
     fn context() -> MapsRequestContext {
         MapsRequestContext::new(
-            MapAccess::authorize(UserRole::MAPPER, &[]).unwrap(),
+            MapAccess::authorize(UserRole::Mapper, &[]).unwrap(),
             MutationActor::new("42", Some("session-1".into())).unwrap(),
         )
     }

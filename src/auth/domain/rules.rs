@@ -14,6 +14,6 @@ mod tests {
     #[test]
     fn requires_at_least_one_workspace_role() {
         assert!(!is_user_in_work_group(&[]));
-        assert!(is_user_in_work_group(&[UserRole::DEVELOPER]));
+        assert!(is_user_in_work_group(&[UserRole::Developer]));
     }
 }

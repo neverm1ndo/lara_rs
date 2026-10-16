@@ -24,14 +24,14 @@ impl ConfigurationAccess {
     ) -> Result<Self, ConfigurationAccessError> {
         let has_role = |required| main_group == required || permissions.contains(&required);
 
-        if has_role(UserRole::DEVELOPER) {
+        if has_role(UserRole::Developer) {
             return Ok(Self {
                 level: ConfigurationAccessLevel::Developer,
                 storage_root: RelativeStoragePath::root(),
             });
         }
 
-        if has_role(UserRole::CONFIGURATOR) {
+        if has_role(UserRole::Configurator) {
             return Ok(Self {
                 level: ConfigurationAccessLevel::Configurator,
                 storage_root: configurator_directory.clone(),
@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn developer_receives_the_full_server_capability() {
         let access =
-            ConfigurationAccess::authorize(UserRole::DEVELOPER, &[], &configurator_directory())
+            ConfigurationAccess::authorize(UserRole::Developer, &[], &configurator_directory())
                 .unwrap();
 
         assert_eq!(access.level(), ConfigurationAccessLevel::Developer);
@@ -87,8 +87,8 @@ mod tests {
     #[test]
     fn configurator_receives_only_the_configured_subtree() {
         let access = ConfigurationAccess::authorize(
-            UserRole::CHALLENGER,
-            &[UserRole::CONFIGURATOR],
+            UserRole::Challenger,
+            &[UserRole::Configurator],
             &configurator_directory(),
         )
         .unwrap();
@@ -104,8 +104,8 @@ mod tests {
     #[test]
     fn developer_membership_takes_precedence_over_configurator_membership() {
         let access = ConfigurationAccess::authorize(
-            UserRole::CONFIGURATOR,
-            &[UserRole::DEVELOPER],
+            UserRole::Configurator,
+            &[UserRole::Developer],
             &configurator_directory(),
         )
         .unwrap();
@@ -117,10 +117,10 @@ mod tests {
     #[test]
     fn other_workspace_roles_are_not_implicitly_authorized() {
         for role in [
-            UserRole::CHALLENGER,
-            UserRole::ADMIN,
-            UserRole::MAPPER,
-            UserRole::BACKUPER,
+            UserRole::Challenger,
+            UserRole::Admin,
+            UserRole::Mapper,
+            UserRole::Backuper,
         ] {
             assert_eq!(
                 ConfigurationAccess::authorize(role, &[], &configurator_directory()),

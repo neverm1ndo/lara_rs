@@ -94,8 +94,8 @@ fn authenticated_user() -> AuthenticatedUser {
     AuthenticatedUser {
         id: 42,
         username: "neo".into(),
-        main_group: UserRole::CHALLENGER,
-        permissions: vec![UserRole::CHALLENGER, UserRole::ADMIN],
+        main_group: UserRole::Challenger,
+        permissions: vec![UserRole::Challenger, UserRole::Admin],
         avatar: None,
     }
 }
@@ -327,8 +327,8 @@ pub(super) fn integrated_app() -> (Router, SharedSessions, SharedUsers) {
     let users = SharedUsers(Arc::new(Mutex::new(LoginUser {
         id: UserId::new(42).unwrap(),
         username: "neo".into(),
-        main_group: UserRole::ADMIN,
-        permissions: vec![UserRole::CHALLENGER, UserRole::ADMIN],
+        main_group: UserRole::Admin,
+        permissions: vec![UserRole::Challenger, UserRole::Admin],
         avatar: None,
         password_hash: legacy_hash("random-salt", "correct"),
     })));

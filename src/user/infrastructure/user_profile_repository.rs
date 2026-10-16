@@ -128,10 +128,10 @@ mod tests {
         assert_eq!(profile.id(), UserId::new(42).unwrap());
         assert_eq!(profile.username(), "neo");
         assert_eq!(profile.avatar(), Some("neo.png"));
-        assert_eq!(profile.main_group(), UserRole::ADMIN);
+        assert_eq!(profile.main_group(), UserRole::Admin);
         assert_eq!(
             profile.permissions(),
-            &[UserRole::CHALLENGER, UserRole::ADMIN, UserRole::BACKUPER]
+            &[UserRole::Challenger, UserRole::Admin, UserRole::Backuper]
         );
     }
 
@@ -173,7 +173,7 @@ mod tests {
         assert!(matches!(
             UserProfile::try_from(inconsistent),
             Err(UserProfileRepositoryError::InvalidProfile(
-                InvalidUserProfile::MainGroupNotGranted(UserRole::ADMIN)
+                InvalidUserProfile::MainGroupNotGranted(UserRole::Admin)
             ))
         ));
     }

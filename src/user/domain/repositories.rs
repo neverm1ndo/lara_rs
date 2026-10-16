@@ -47,8 +47,8 @@ mod tests {
             UserId::new(42).unwrap(),
             "neo",
             None,
-            UserRole::ADMIN,
-            vec![UserRole::ADMIN],
+            UserRole::Admin,
+            vec![UserRole::Admin],
         )
         .unwrap()
     }

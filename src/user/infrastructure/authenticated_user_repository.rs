@@ -117,7 +117,7 @@ mod tests {
 
         assert_eq!(
             user.permissions,
-            vec![UserRole::CHALLENGER, UserRole::ADMIN, UserRole::BACKUPER]
+            vec![UserRole::Challenger, UserRole::Admin, UserRole::Backuper]
         );
     }
 

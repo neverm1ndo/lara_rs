@@ -296,7 +296,7 @@ mod tests {
     }
 
     fn access() -> MapAccess {
-        MapAccess::authorize(UserRole::MAPPER, &[]).unwrap()
+        MapAccess::authorize(UserRole::Mapper, &[]).unwrap()
     }
 
     #[test]

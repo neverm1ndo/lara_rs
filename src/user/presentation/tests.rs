@@ -93,8 +93,8 @@ fn profile() -> UserProfile {
         UserId::new(42).unwrap(),
         "neo",
         Some("neo.png".into()),
-        UserRole::ADMIN,
-        vec![UserRole::CHALLENGER, UserRole::ADMIN],
+        UserRole::Admin,
+        vec![UserRole::Challenger, UserRole::Admin],
     )
     .unwrap()
 }
@@ -134,12 +134,12 @@ async fn json_body(response: Response) -> Value {
 #[tokio::test]
 async fn every_workspace_role_can_read_a_safe_user_profile() {
     for role in [
-        UserRole::CHALLENGER,
-        UserRole::DEVELOPER,
-        UserRole::ADMIN,
-        UserRole::MAPPER,
-        UserRole::CONFIGURATOR,
-        UserRole::BACKUPER,
+        UserRole::Challenger,
+        UserRole::Developer,
+        UserRole::Admin,
+        UserRole::Mapper,
+        UserRole::Configurator,
+        UserRole::Backuper,
     ] {
         let (app, requested_ids) = test_app(Ok(principal(role)), Ok(profile()));
         let response = app.oneshot(request("/user/42", true)).await.unwrap();
@@ -163,7 +163,7 @@ async fn every_workspace_role_can_read_a_safe_user_profile() {
 
 #[tokio::test]
 async fn endpoint_requires_a_valid_authenticated_session() {
-    let (app, requested_ids) = test_app(Ok(principal(UserRole::CHALLENGER)), Ok(profile()));
+    let (app, requested_ids) = test_app(Ok(principal(UserRole::Challenger)), Ok(profile()));
     let missing = app.oneshot(request("/user/42", false)).await.unwrap();
     assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
     assert!(requested_ids.lock().unwrap().is_empty());
@@ -186,7 +186,7 @@ async fn endpoint_requires_a_valid_authenticated_session() {
 #[tokio::test]
 async fn malformed_non_positive_ids_are_rejected_before_the_service() {
     for uri in ["/user/not-a-number", "/user/0", "/user/-1"] {
-        let (app, requested_ids) = test_app(Ok(principal(UserRole::ADMIN)), Ok(profile()));
+        let (app, requested_ids) = test_app(Ok(principal(UserRole::Admin)), Ok(profile()));
         let response = app.oneshot(request(uri, true)).await.unwrap();
 
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "uri: {uri}");
@@ -209,7 +209,7 @@ async fn application_failures_are_mapped_to_stable_http_errors() {
             "SERVICE_UNAVAILABLE",
         ),
     ] {
-        let (app, requested_ids) = test_app(Ok(principal(UserRole::MAPPER)), Err(error));
+        let (app, requested_ids) = test_app(Ok(principal(UserRole::Mapper)), Err(error));
         let response = app.oneshot(request("/user/42", true)).await.unwrap();
 
         assert_eq!(response.status(), status);

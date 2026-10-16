@@ -163,8 +163,8 @@ mod tests {
     #[tokio::test]
     async fn authorizes_developer_and_mapper_with_the_same_extractor() {
         for (role, expected) in [
-            (UserRole::DEVELOPER, MapAccessLevel::Developer),
-            (UserRole::MAPPER, MapAccessLevel::Mapper),
+            (UserRole::Developer, MapAccessLevel::Developer),
+            (UserRole::Mapper, MapAccessLevel::Mapper),
         ] {
             let expected_principal = principal(role, vec![]);
             let authorized = extract(
@@ -181,7 +181,7 @@ mod tests {
 
     #[tokio::test]
     async fn accepts_required_role_from_permissions() {
-        let expected_principal = principal(UserRole::CHALLENGER, vec![UserRole::MAPPER]);
+        let expected_principal = principal(UserRole::Challenger, vec![UserRole::Mapper]);
         let authorized = extract(
             &state(Ok(expected_principal.clone())),
             Some("Bearer signed.jwt"),
@@ -196,7 +196,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_an_authenticated_user_without_an_allowed_role() {
-        let authenticated = principal(UserRole::ADMIN, vec![UserRole::CONFIGURATOR]);
+        let authenticated = principal(UserRole::Admin, vec![UserRole::Configurator]);
         let rejection = extract(&state(Ok(authenticated)), Some("Bearer signed.jwt"))
             .await
             .unwrap_err();
@@ -206,7 +206,7 @@ mod tests {
 
     #[tokio::test]
     async fn preserves_authentication_status_codes() {
-        let missing = extract(&state(Ok(principal(UserRole::MAPPER, vec![]))), None)
+        let missing = extract(&state(Ok(principal(UserRole::Mapper, vec![]))), None)
             .await
             .unwrap_err();
         assert_eq!(missing.into_response().status(), StatusCode::UNAUTHORIZED);

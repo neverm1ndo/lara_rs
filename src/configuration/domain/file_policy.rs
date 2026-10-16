@@ -195,7 +195,7 @@ mod tests {
         let policy = policy();
         let configurator_root = path("scriptfiles/config");
         let access =
-            ConfigurationAccess::authorize(UserRole::CONFIGURATOR, &[], &configurator_root)
+            ConfigurationAccess::authorize(UserRole::Configurator, &[], &configurator_root)
                 .unwrap();
 
         assert!(policy.is_ignored(&access.server_path(&path("private/secrets.cfg"))));

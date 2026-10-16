@@ -148,7 +148,7 @@ mod tests {
         LoginUser {
             id: UserId::new(42).unwrap(),
             username: "neo".into(),
-            main_group: UserRole::ADMIN,
+            main_group: UserRole::Admin,
             permissions,
             avatar: None,
             password_hash: "stored-hash".into(),
@@ -159,7 +159,7 @@ mod tests {
     async fn authenticates_valid_credentials_and_returns_safe_user() {
         let service = CredentialAuthenticationService::new(
             Passwords::default(),
-            Users(UserResult::Found(login_user(vec![UserRole::ADMIN]))),
+            Users(UserResult::Found(login_user(vec![UserRole::Admin]))),
         );
 
         let verified = service
@@ -170,7 +170,7 @@ mod tests {
         assert_eq!(verified.user_id, UserId::new(42).unwrap());
         assert_eq!(verified.user.id, 42);
         assert_eq!(verified.user.username, "neo");
-        assert_eq!(verified.user.permissions, vec![UserRole::ADMIN]);
+        assert_eq!(verified.user.permissions, vec![UserRole::Admin]);
     }
 
     #[tokio::test]
@@ -190,7 +190,7 @@ mod tests {
 
         let wrong_password = CredentialAuthenticationService::new(
             Passwords::default(),
-            Users(UserResult::Found(login_user(vec![UserRole::ADMIN]))),
+            Users(UserResult::Found(login_user(vec![UserRole::Admin]))),
         );
         assert_eq!(
             wrong_password

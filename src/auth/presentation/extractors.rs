@@ -122,8 +122,8 @@ mod tests {
             user: AuthenticatedUser {
                 id: 42,
                 username: "neo".into(),
-                main_group: UserRole::CHALLENGER,
-                permissions: vec![UserRole::CHALLENGER, UserRole::ADMIN],
+                main_group: UserRole::Challenger,
+                permissions: vec![UserRole::Challenger, UserRole::Admin],
                 avatar: None,
             },
             session_id: SessionId::new("session-1").unwrap(),

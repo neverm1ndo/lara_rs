@@ -144,10 +144,10 @@ mod tests {
 
         assert_eq!(login_user.id, UserId::new(42).unwrap());
         assert_eq!(login_user.username, "neo");
-        assert_eq!(login_user.main_group, UserRole::ADMIN);
+        assert_eq!(login_user.main_group, UserRole::Admin);
         assert_eq!(
             login_user.permissions,
-            vec![UserRole::CHALLENGER, UserRole::ADMIN, UserRole::BACKUPER]
+            vec![UserRole::Challenger, UserRole::Admin, UserRole::Backuper]
         );
         assert_eq!(login_user.avatar.as_deref(), Some("neo.png"));
         assert_eq!(

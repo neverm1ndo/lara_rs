@@ -290,8 +290,8 @@ mod tests {
         LoginUser {
             id: UserId::new(42).unwrap(),
             username: "neo".into(),
-            main_group: UserRole::ADMIN,
-            permissions: vec![UserRole::ADMIN],
+            main_group: UserRole::Admin,
+            permissions: vec![UserRole::Admin],
             avatar: None,
             password_hash: "stored-hash".into(),
         }

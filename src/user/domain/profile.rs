@@ -112,12 +112,12 @@ mod tests {
     #[test]
     fn creates_safe_profile_for_every_workspace_role() {
         for role in [
-            UserRole::CHALLENGER,
-            UserRole::DEVELOPER,
-            UserRole::ADMIN,
-            UserRole::MAPPER,
-            UserRole::CONFIGURATOR,
-            UserRole::BACKUPER,
+            UserRole::Challenger,
+            UserRole::Developer,
+            UserRole::Admin,
+            UserRole::Mapper,
+            UserRole::Configurator,
+            UserRole::Backuper,
         ] {
             let profile = profile(role, vec![role]).unwrap();
 
@@ -135,8 +135,8 @@ mod tests {
             UserId::new(42).unwrap(),
             "  ",
             None,
-            UserRole::ADMIN,
-            vec![UserRole::ADMIN],
+            UserRole::Admin,
+            vec![UserRole::Admin],
         );
 
         assert_eq!(result, Err(InvalidUserProfile::EmptyUsername));
@@ -145,7 +145,7 @@ mod tests {
     #[test]
     fn rejects_empty_permissions() {
         assert_eq!(
-            profile(UserRole::ADMIN, vec![]),
+            profile(UserRole::Admin, vec![]),
             Err(InvalidUserProfile::EmptyPermissions)
         );
     }
@@ -153,8 +153,8 @@ mod tests {
     #[test]
     fn rejects_main_group_missing_from_permissions() {
         assert_eq!(
-            profile(UserRole::ADMIN, vec![UserRole::DEVELOPER]),
-            Err(InvalidUserProfile::MainGroupNotGranted(UserRole::ADMIN))
+            profile(UserRole::Admin, vec![UserRole::Developer]),
+            Err(InvalidUserProfile::MainGroupNotGranted(UserRole::Admin))
         );
     }
 
@@ -162,10 +162,10 @@ mod tests {
     fn rejects_duplicate_permissions() {
         assert_eq!(
             profile(
-                UserRole::ADMIN,
-                vec![UserRole::ADMIN, UserRole::DEVELOPER, UserRole::ADMIN],
+                UserRole::Admin,
+                vec![UserRole::Admin, UserRole::Developer, UserRole::Admin],
             ),
-            Err(InvalidUserProfile::DuplicatePermission(UserRole::ADMIN))
+            Err(InvalidUserProfile::DuplicatePermission(UserRole::Admin))
         );
     }
 }

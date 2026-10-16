@@ -23,12 +23,12 @@ impl MapAccess {
     ) -> Result<Self, MapAccessError> {
         let has_role = |required| main_group == required || permissions.contains(&required);
 
-        if has_role(UserRole::DEVELOPER) {
+        if has_role(UserRole::Developer) {
             return Ok(Self {
                 level: MapAccessLevel::Developer,
             });
         }
-        if has_role(UserRole::MAPPER) {
+        if has_role(UserRole::Mapper) {
             return Ok(Self {
                 level: MapAccessLevel::Mapper,
             });
@@ -55,16 +55,16 @@ mod tests {
     #[test]
     fn authorizes_developer_and_mapper_from_main_group_or_permissions() {
         let cases = [
-            (UserRole::DEVELOPER, vec![], MapAccessLevel::Developer),
+            (UserRole::Developer, vec![], MapAccessLevel::Developer),
             (
-                UserRole::CHALLENGER,
-                vec![UserRole::DEVELOPER],
+                UserRole::Challenger,
+                vec![UserRole::Developer],
                 MapAccessLevel::Developer,
             ),
-            (UserRole::MAPPER, vec![], MapAccessLevel::Mapper),
+            (UserRole::Mapper, vec![], MapAccessLevel::Mapper),
             (
-                UserRole::CHALLENGER,
-                vec![UserRole::MAPPER],
+                UserRole::Challenger,
+                vec![UserRole::Mapper],
                 MapAccessLevel::Mapper,
             ),
         ];
@@ -81,7 +81,7 @@ mod tests {
 
     #[test]
     fn developer_membership_takes_precedence_for_a_dual_role_user() {
-        let access = MapAccess::authorize(UserRole::MAPPER, &[UserRole::DEVELOPER]).unwrap();
+        let access = MapAccess::authorize(UserRole::Mapper, &[UserRole::Developer]).unwrap();
 
         assert_eq!(access.level(), MapAccessLevel::Developer);
     }
@@ -89,10 +89,10 @@ mod tests {
     #[test]
     fn rejects_other_workspace_roles() {
         for role in [
-            UserRole::CHALLENGER,
-            UserRole::ADMIN,
-            UserRole::CONFIGURATOR,
-            UserRole::BACKUPER,
+            UserRole::Challenger,
+            UserRole::Admin,
+            UserRole::Configurator,
+            UserRole::Backuper,
         ] {
             assert_eq!(
                 MapAccess::authorize(role, &[]),

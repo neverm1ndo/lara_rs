@@ -256,8 +256,8 @@ impl AuthenticateBearerToken for Authenticator {
                 user: AuthenticatedUser {
                     id: 42,
                     username: "neo".into(),
-                    main_group: UserRole::MAPPER,
-                    permissions: vec![UserRole::MAPPER],
+                    main_group: UserRole::Mapper,
+                    permissions: vec![UserRole::Mapper],
                     avatar: None,
                 },
                 session_id: SessionId::new("session-1").unwrap(),
@@ -375,7 +375,7 @@ impl Harness {
 
     async fn overwrite(&self, replacement: &[u8]) {
         let context = MapsRequestContext::new(
-            MapAccess::authorize(UserRole::MAPPER, &[]).unwrap(),
+            MapAccess::authorize(UserRole::Mapper, &[]).unwrap(),
             MutationActor::new("42", Some("session-1".into())).unwrap(),
         );
         let batch = MapUploadBatch::new(vec![MapUpload::new(

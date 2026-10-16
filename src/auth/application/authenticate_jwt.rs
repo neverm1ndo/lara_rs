@@ -203,7 +203,7 @@ mod tests {
         AuthenticatedUser {
             id: 42,
             username: "neo".into(),
-            main_group: UserRole::CHALLENGER,
+            main_group: UserRole::Challenger,
             permissions,
             avatar: None,
         }
@@ -218,7 +218,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_principal_for_active_session_and_work_group() {
-        let expected_user = user(vec![UserRole::CHALLENGER]);
+        let expected_user = user(vec![UserRole::Challenger]);
         let service = service(Ok(Some(session())), Ok(Some(expected_user.clone())));
 
         let principal = service.authenticate("token").await.unwrap();
@@ -229,7 +229,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_missing_revoked_expired_or_mismatched_session() {
-        let valid_user = || Ok(Some(user(vec![UserRole::CHALLENGER])));
+        let valid_user = || Ok(Some(user(vec![UserRole::Challenger])));
 
         assert_eq!(
             service(Ok(None), valid_user()).authenticate("token").await,
@@ -288,7 +288,7 @@ mod tests {
             Err(AuthenticationError::Unauthorized)
         );
 
-        let mut another_user = user(vec![UserRole::CHALLENGER]);
+        let mut another_user = user(vec![UserRole::Challenger]);
         another_user.id = 7;
         assert_eq!(
             service(Ok(Some(session())), Ok(Some(another_user)))
@@ -303,7 +303,7 @@ mod tests {
         let service = JwtAuthenticationService::new(
             Verifier(Err(AuthenticationError::Unauthorized)),
             Sessions(Ok(Some(session()))),
-            Users(Ok(Some(user(vec![UserRole::CHALLENGER])))),
+            Users(Ok(Some(user(vec![UserRole::Challenger])))),
         );
 
         assert_eq!(
@@ -321,7 +321,7 @@ mod tests {
         let service = JwtAuthenticationService::new(
             Verifier(Ok(oversized_claims)),
             Sessions(Ok(Some(matching_session))),
-            Users(Ok(Some(user(vec![UserRole::CHALLENGER])))),
+            Users(Ok(Some(user(vec![UserRole::Challenger])))),
         );
 
         assert_eq!(
@@ -337,7 +337,7 @@ mod tests {
         assert_eq!(
             service(
                 Err(database_error()),
-                Ok(Some(user(vec![UserRole::CHALLENGER]))),
+                Ok(Some(user(vec![UserRole::Challenger]))),
             )
             .authenticate("token")
             .await,

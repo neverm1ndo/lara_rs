@@ -179,7 +179,7 @@ async fn json_body(response: axum::response::Response) -> Value {
 async fn endpoints_allow_developer_and_mapper_but_reject_other_or_missing_sessions() {
     let directory = TestDirectory::new();
 
-    for role in [UserRole::DEVELOPER, UserRole::MAPPER] {
+    for role in [UserRole::Developer, UserRole::Mapper] {
         let response = app(&directory, Ok(principal(role)), default_limits())
             .await
             .oneshot(authorized_request("/tree"))
@@ -190,7 +190,7 @@ async fn endpoints_allow_developer_and_mapper_but_reject_other_or_missing_sessio
 
     let forbidden = app(
         &directory,
-        Ok(principal(UserRole::CONFIGURATOR)),
+        Ok(principal(UserRole::Configurator)),
         default_limits(),
     )
     .await
@@ -202,7 +202,7 @@ async fn endpoints_allow_developer_and_mapper_but_reject_other_or_missing_sessio
     let missing = Request::builder().uri("/tree").body(Body::empty()).unwrap();
     let unauthorized = app(
         &directory,
-        Ok(principal(UserRole::MAPPER)),
+        Ok(principal(UserRole::Mapper)),
         default_limits(),
     )
     .await
@@ -227,7 +227,7 @@ async fn tree_and_read_endpoints_preserve_nested_files_and_exact_bytes() {
     std::fs::write(directory.path().join("ignored/readme.txt"), b"ignored").unwrap();
     let app = app(
         &directory,
-        Ok(principal(UserRole::MAPPER)),
+        Ok(principal(UserRole::Mapper)),
         default_limits(),
     )
     .await;
@@ -269,7 +269,7 @@ async fn multipart_crud_supports_multiple_nested_maps_and_returns_events() {
     std::fs::create_dir(directory.path().join("archive")).unwrap();
     let app = app(
         &directory,
-        Ok(principal(UserRole::DEVELOPER)),
+        Ok(principal(UserRole::Developer)),
         default_limits(),
     )
     .await;
@@ -346,7 +346,7 @@ async fn multipart_crud_supports_multiple_nested_maps_and_returns_events() {
 async fn multipart_limits_are_enforced_before_the_service_is_called() {
     let directory = TestDirectory::new();
     let limits = MultipartUploadLimits::new(1, 4, 4).unwrap();
-    let app = app(&directory, Ok(principal(UserRole::MAPPER)), limits).await;
+    let app = app(&directory, Ok(principal(UserRole::Mapper)), limits).await;
 
     let too_many = app
         .clone()
@@ -375,7 +375,7 @@ async fn invalid_extensions_traversal_duplicates_and_wrong_fields_are_rejected()
     let directory = TestDirectory::new();
     let app = app(
         &directory,
-        Ok(principal(UserRole::DEVELOPER)),
+        Ok(principal(UserRole::Developer)),
         default_limits(),
     )
     .await;

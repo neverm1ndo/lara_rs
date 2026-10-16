@@ -357,7 +357,7 @@ fn authorized_request(uri: &str) -> Request<Body> {
 
 #[tokio::test]
 async fn tree_endpoint_returns_the_role_scoped_tree() {
-    let response = app(UserRole::DEVELOPER)
+    let response = app(UserRole::Developer)
         .oneshot(authorized_request("/tree"))
         .await
         .unwrap();
@@ -371,7 +371,7 @@ async fn tree_endpoint_returns_the_role_scoped_tree() {
 
 #[tokio::test]
 async fn read_endpoint_streams_windows_1251_bytes_without_transcoding() {
-    let response = app(UserRole::CONFIGURATOR)
+    let response = app(UserRole::Configurator)
         .oneshot(authorized_request("/files?path=server.cfg"))
         .await
         .unwrap();
@@ -408,7 +408,7 @@ async fn mutation_endpoints_preserve_legacy_bytes_and_dispatch_typed_commands() 
         .header(CONTENT_TYPE, &multipart_content_type)
         .body(Body::from(multipart_body))
         .unwrap();
-    let response = app_with_service(UserRole::DEVELOPER, Arc::clone(&service))
+    let response = app_with_service(UserRole::Developer, Arc::clone(&service))
         .oneshot(create)
         .await
         .unwrap();
@@ -425,7 +425,7 @@ async fn mutation_endpoints_preserve_legacy_bytes_and_dispatch_typed_commands() 
         .header(CONTENT_TYPE, multipart_content_type)
         .body(Body::from(multipart_body))
         .unwrap();
-    let response = app_with_service(UserRole::DEVELOPER, Arc::clone(&service))
+    let response = app_with_service(UserRole::Developer, Arc::clone(&service))
         .oneshot(overwrite)
         .await
         .unwrap();
@@ -437,7 +437,7 @@ async fn mutation_endpoints_preserve_legacy_bytes_and_dispatch_typed_commands() 
         .header(AUTHORIZATION, "Bearer signed.jwt")
         .body(Body::empty())
         .unwrap();
-    let response = app_with_service(UserRole::DEVELOPER, Arc::clone(&service))
+    let response = app_with_service(UserRole::Developer, Arc::clone(&service))
         .oneshot(delete)
         .await
         .unwrap();
@@ -452,7 +452,7 @@ async fn mutation_endpoints_preserve_legacy_bytes_and_dispatch_typed_commands() 
             r#"{"source":"old-name.cfg","destination":"new-name.cfg"}"#,
         ))
         .unwrap();
-    let response = app_with_service(UserRole::DEVELOPER, service)
+    let response = app_with_service(UserRole::Developer, service)
         .oneshot(rename)
         .await
         .unwrap();
@@ -487,7 +487,7 @@ async fn upload_rejects_bytes_invalid_for_the_server_configured_encoding() {
         .body(Body::from(body))
         .unwrap();
 
-    let response = app_with_service_and_encoding(UserRole::DEVELOPER, service, UTF_8)
+    let response = app_with_service_and_encoding(UserRole::Developer, service, UTF_8)
         .oneshot(request)
         .await
         .unwrap();
@@ -506,13 +506,13 @@ async fn upload_requires_exactly_one_file_field() {
         .body(Body::from("--empty--\r\n"))
         .unwrap();
 
-    let response = app(UserRole::DEVELOPER).oneshot(request).await.unwrap();
+    let response = app(UserRole::Developer).oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
 async fn endpoints_reject_users_outside_the_two_allowed_roles() {
-    let response = app(UserRole::ADMIN)
+    let response = app(UserRole::Admin)
         .oneshot(authorized_request("/tree"))
         .await
         .unwrap();
@@ -522,7 +522,7 @@ async fn endpoints_reject_users_outside_the_two_allowed_roles() {
 
 #[tokio::test]
 async fn read_endpoint_rejects_traversal_before_calling_the_service() {
-    let response = app(UserRole::DEVELOPER)
+    let response = app(UserRole::Developer)
         .oneshot(authorized_request("/files?path=../server.cfg"))
         .await
         .unwrap();

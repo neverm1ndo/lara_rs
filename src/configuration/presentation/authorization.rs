@@ -173,7 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn authorizes_developer_with_the_server_root_capability() {
-        let expected = principal(UserRole::DEVELOPER, vec![]);
+        let expected = principal(UserRole::Developer, vec![]);
         let authorized = extract(&state(Ok(expected.clone())), Some("Bearer signed.jwt"))
             .await
             .unwrap();
@@ -188,7 +188,7 @@ mod tests {
 
     #[tokio::test]
     async fn authorizes_configurator_permission_with_the_narrow_capability() {
-        let authenticated = principal(UserRole::CHALLENGER, vec![UserRole::CONFIGURATOR]);
+        let authenticated = principal(UserRole::Challenger, vec![UserRole::Configurator]);
         let authorized = extract(&state(Ok(authenticated)), Some("Bearer signed.jwt"))
             .await
             .unwrap();
@@ -205,7 +205,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_an_authenticated_user_without_an_allowed_role() {
-        let authenticated = principal(UserRole::ADMIN, vec![UserRole::BACKUPER]);
+        let authenticated = principal(UserRole::Admin, vec![UserRole::Backuper]);
         let rejection = extract(&state(Ok(authenticated)), Some("Bearer signed.jwt"))
             .await
             .unwrap_err();
@@ -215,7 +215,7 @@ mod tests {
 
     #[tokio::test]
     async fn preserves_authentication_status_codes() {
-        let authenticated = principal(UserRole::DEVELOPER, vec![]);
+        let authenticated = principal(UserRole::Developer, vec![]);
         let missing = extract(&state(Ok(authenticated)), None).await.unwrap_err();
         assert_eq!(missing.into_response().status(), StatusCode::UNAUTHORIZED);
 
