@@ -235,6 +235,7 @@ fn base_openapi_document() -> utoipa::openapi::OpenApi {
     auth::presentation::openapi_document()
         .merge_from(maps::presentation::openapi_document())
         .merge_from(backups::presentation::openapi_document())
+        .merge_from(user::presentation::openapi_document())
 }
 
 async fn shutdown_signal() {
@@ -319,6 +320,7 @@ mod tests {
         assert!(specification["paths"]["/backups/backup/{backup_id}"]["get"].is_object());
         assert!(specification["paths"]["/backups/restore/{backup_id}"]["post"].is_object());
         assert!(specification["paths"]["/user/{id}"]["get"].is_object());
+        assert!(specification["components"]["schemas"]["UserResponse"].is_object());
         assert!(specification["components"]["schemas"]["MapFileMutationsResponse"].is_object());
         assert_eq!(
             specification["components"]["securitySchemes"]["bearerAuth"]["scheme"],
