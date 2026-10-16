@@ -1,5 +1,9 @@
 mod app_state;
 mod auth;
+// The backups context is introduced layer by layer. Its domain model is kept
+// independent from MongoDB, the local filesystem and HTTP adapters.
+#[allow(dead_code)]
+mod backups;
 mod bootstrap;
 // The configuration context is introduced layer by layer and will be wired
 // into AppState when its application services and HTTP routes are ready.
