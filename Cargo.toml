@@ -2,6 +2,20 @@
 name = "lara-rs"
 version = "0.1.0"
 edition = "2024"
+authors = ["neverm1ndo <it@nmnd.ru>"]
+license = "MIT"
+description = "Liberty Admin Realtime Analytics"
+
+[package.metadata.deb]
+maintainer = "neverm1ndo <it@nmnd.ru>"
+copyright = "2026 neverm1ndo"
+license-file = ["LICENSE", "4"]
+extended-description = """\
+A longer, multi-line description of the application \
+that explains what it does in detail.\
+"""
+# Автоматически определит зависимости по ELF-файлу, но можно добавить явные:
+depends = "$auto, libssl3"
 
 [dependencies]
 async-compression = { version = "0.4.50", features = ["gzip", "tokio"] }
