@@ -9,6 +9,7 @@ axum = { version = "0.8.9", features = ["multipart"] }
 chrono = "0.4.45"
 config = { version = "0.15.27", default-features = false, features = ["toml"] }
 dotenvy = "0.15.7"
+diff-match-patch-rs = "0.5.1"
 encoding_rs = "0.8.42"
 glob = "0.3.4"
 jsonwebtoken = { version = "11.1.0", features = ["rust_crypto"] }
