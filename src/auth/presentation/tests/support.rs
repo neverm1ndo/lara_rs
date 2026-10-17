@@ -233,6 +233,7 @@ pub(super) fn active_session() -> Session {
         user_id: UserId::new(42).unwrap(),
         expires_at: Utc::now() + Duration::minutes(5),
         revoked_at: None,
+        authentication_method: crate::auth::domain::mfa::AuthenticationMethod::Password,
     }
 }
 

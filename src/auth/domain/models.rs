@@ -6,6 +6,7 @@ use serde::{
 use std::fmt;
 use thiserror::Error;
 
+use super::mfa::AuthenticationMethod;
 use crate::shared::user_role::UserRole;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -147,6 +148,7 @@ pub struct Session {
     pub user_id: UserId,
     pub expires_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
+    pub authentication_method: AuthenticationMethod,
 }
 
 impl Session {
@@ -204,6 +206,7 @@ mod tests {
             user_id: UserId::new(42).unwrap(),
             expires_at: DateTime::from_timestamp(1_001, 0).unwrap(),
             revoked_at: None,
+            authentication_method: AuthenticationMethod::Password,
         };
 
         assert!(session.is_active(now));

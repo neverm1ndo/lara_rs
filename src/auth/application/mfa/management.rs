@@ -4,18 +4,21 @@ use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
 
 use crate::auth::{
-    application::mfa::ports::{
-        MfaClock, MfaFactorRepository, MfaRepositoryError, MfaSecurityError, RecoveryCodeGenerator,
-        RecoveryCodeHasher, TotpSecretCipher, TotpSecretGenerator, TotpVerifier,
+    application::mfa::{
+        ports::{
+            MfaClock, MfaFactorRepository, MfaRepositoryError, MfaSecurityError,
+            RecoveryCodeGenerator, RecoveryCodeHasher, TotpSecretCipher, TotpSecretGenerator,
+            TotpVerifier,
+        },
+        verification::{MfaFactorVerificationService, MfaVerificationError},
     },
     domain::{
-        mfa::{
-            AuthenticationMethod, MfaEnrollmentId, MfaFactorStatus, RecoveryCode, TotpCode,
-            TotpFactor,
-        },
+        mfa::{MfaEnrollmentId, MfaFactorStatus, RecoveryCode, TotpCode, TotpFactor},
         models::UserId,
     },
 };
+
+pub use crate::auth::application::mfa::verification::MfaProof;
 
 const RECOVERY_CODE_COUNT: usize = 10;
 
@@ -39,11 +42,6 @@ pub struct MfaActivation {
     /// Recovery codes are returned exactly once and are never persisted in
     /// plaintext. The caller must make this explicit to the user.
     pub recovery_codes: Vec<RecoveryCode>,
-}
-
-pub enum MfaProof<'a> {
-    Totp(&'a TotpCode),
-    RecoveryCode(&'a RecoveryCode),
 }
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
@@ -79,6 +77,7 @@ pub struct MfaManagementService {
     recovery_codes: Arc<dyn RecoveryCodeGenerator>,
     recovery_hasher: Arc<dyn RecoveryCodeHasher>,
     clock: Arc<dyn MfaClock>,
+    factor_verification: MfaFactorVerificationService,
     issuer: String,
     enrollment_ttl: Duration,
     totp_period_seconds: u64,
@@ -113,6 +112,13 @@ impl MfaManagementService {
         }
 
         Ok(Self {
+            factor_verification: MfaFactorVerificationService::new(
+                Arc::clone(&factors),
+                Arc::clone(&cipher),
+                Arc::clone(&verifier),
+                Arc::clone(&recovery_hasher),
+                Arc::clone(&clock),
+            ),
             factors,
             secrets,
             cipher,
@@ -264,7 +270,10 @@ impl MfaManagementService {
         user_id: UserId,
         proof: MfaProof<'_>,
     ) -> Result<(), MfaManagementError> {
-        self.verify_active_factor(user_id, proof).await?;
+        self.factor_verification
+            .verify(user_id, proof)
+            .await
+            .map_err(map_verification_error)?;
         let disabled = self
             .factors
             .disable_active(user_id, self.clock.now())
@@ -281,7 +290,10 @@ impl MfaManagementService {
         user_id: UserId,
         proof: MfaProof<'_>,
     ) -> Result<Vec<RecoveryCode>, MfaManagementError> {
-        self.verify_active_factor(user_id, proof).await?;
+        self.factor_verification
+            .verify(user_id, proof)
+            .await
+            .map_err(map_verification_error)?;
         let recovery_codes = self
             .recovery_codes
             .generate(RECOVERY_CODE_COUNT)
@@ -306,67 +318,6 @@ impl MfaManagementService {
         }
         Ok(recovery_codes)
     }
-
-    async fn verify_active_factor(
-        &self,
-        user_id: UserId,
-        proof: MfaProof<'_>,
-    ) -> Result<AuthenticationMethod, MfaManagementError> {
-        let stored = self
-            .factors
-            .find_by_user_id(user_id)
-            .await
-            .map_err(map_repository_error)?
-            .filter(|stored| stored.factor.status() == MfaFactorStatus::Active)
-            .ok_or(MfaManagementError::NotFound)?;
-
-        match proof {
-            MfaProof::Totp(code) => {
-                let secret = self
-                    .cipher
-                    .decrypt(user_id, stored.factor.encrypted_secret())
-                    .map_err(map_security_error)?;
-                let step = self
-                    .verifier
-                    .verify(&secret, code, self.clock.now())
-                    .map_err(map_security_error)?
-                    .ok_or(MfaManagementError::InvalidCode)?;
-                let accepted = self
-                    .factors
-                    .accept_totp_step(user_id, step)
-                    .await
-                    .map_err(map_repository_error)?;
-                if !accepted.was_applied() {
-                    return Err(MfaManagementError::InvalidCode);
-                }
-                Ok(AuthenticationMethod::PasswordTotp)
-            }
-            MfaProof::RecoveryCode(code) => {
-                let mut matched = None;
-                for hash in &stored.recovery_code_hashes {
-                    if self
-                        .recovery_hasher
-                        .verify(code, hash)
-                        .await
-                        .map_err(map_security_error)?
-                        && matched.is_none()
-                    {
-                        matched = Some(hash);
-                    }
-                }
-                let hash = matched.ok_or(MfaManagementError::InvalidCode)?;
-                let consumed = self
-                    .factors
-                    .consume_recovery_code(user_id, hash)
-                    .await
-                    .map_err(map_repository_error)?;
-                if !consumed.was_applied() {
-                    return Err(MfaManagementError::InvalidCode);
-                }
-                Ok(AuthenticationMethod::PasswordRecoveryCode)
-            }
-        }
-    }
 }
 
 fn map_repository_error(error: MfaRepositoryError) -> MfaManagementError {
@@ -382,6 +333,14 @@ fn map_repository_error(error: MfaRepositoryError) -> MfaManagementError {
 fn map_security_error(error: MfaSecurityError) -> MfaManagementError {
     tracing::error!(error = %error, error_debug = ?error, "MFA security operation failed");
     MfaManagementError::Unavailable
+}
+
+fn map_verification_error(error: MfaVerificationError) -> MfaManagementError {
+    match error {
+        MfaVerificationError::NotFound => MfaManagementError::NotFound,
+        MfaVerificationError::InvalidCode => MfaManagementError::InvalidCode,
+        MfaVerificationError::Unavailable => MfaManagementError::Unavailable,
+    }
 }
 
 fn encode_base32(bytes: &[u8]) -> String {
