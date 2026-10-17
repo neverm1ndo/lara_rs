@@ -105,7 +105,9 @@ where
                 .map_err(|_| AuthenticationError::Unavailable)?
                 .ok_or(AuthenticationError::Unauthorized)?;
 
-            if user.id != claims.sub.get() || !is_user_in_work_group(&user.permissions) {
+            if user.id != claims.sub.get()
+                || !is_user_in_work_group(user.main_group, &user.permissions)
+            {
                 return Err(AuthenticationError::Unauthorized);
             }
 
@@ -199,11 +201,11 @@ mod tests {
         }
     }
 
-    fn user(permissions: Vec<UserRole>) -> AuthenticatedUser {
+    fn user(main_group: UserRole, permissions: Vec<UserRole>) -> AuthenticatedUser {
         AuthenticatedUser {
             id: 42,
             username: "neo".into(),
-            main_group: UserRole::Challenger,
+            main_group,
             permissions,
             avatar: None,
         }
@@ -218,7 +220,7 @@ mod tests {
 
     #[tokio::test]
     async fn returns_principal_for_active_session_and_work_group() {
-        let expected_user = user(vec![UserRole::Challenger]);
+        let expected_user = user(UserRole::Challenger, Vec::new());
         let service = service(Ok(Some(session())), Ok(Some(expected_user.clone())));
 
         let principal = service.authenticate("token").await.unwrap();
@@ -229,7 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_missing_revoked_expired_or_mismatched_session() {
-        let valid_user = || Ok(Some(user(vec![UserRole::Challenger])));
+        let valid_user = || Ok(Some(user(UserRole::Challenger, Vec::new())));
 
         assert_eq!(
             service(Ok(None), valid_user()).authenticate("token").await,
@@ -274,21 +276,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_missing_user_and_insufficient_permissions() {
+    async fn rejects_missing_user_and_mismatched_identity() {
         assert_eq!(
             service(Ok(Some(session())), Ok(None))
                 .authenticate("token")
                 .await,
             Err(AuthenticationError::Unauthorized)
         );
-        assert_eq!(
-            service(Ok(Some(session())), Ok(Some(user(vec![]))))
-                .authenticate("token")
-                .await,
-            Err(AuthenticationError::Unauthorized)
-        );
 
-        let mut another_user = user(vec![UserRole::Challenger]);
+        let mut another_user = user(UserRole::Challenger, Vec::new());
         another_user.id = 7;
         assert_eq!(
             service(Ok(Some(session())), Ok(Some(another_user)))
@@ -299,11 +295,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepts_workspace_main_group_without_permission_duplication() {
+        for main_group in [
+            UserRole::Challenger,
+            UserRole::Developer,
+            UserRole::Admin,
+            UserRole::Mapper,
+            UserRole::Configurator,
+            UserRole::Backuper,
+        ] {
+            let expected_user = user(main_group, Vec::new());
+            let principal = service(Ok(Some(session())), Ok(Some(expected_user.clone())))
+                .authenticate("token")
+                .await
+                .unwrap();
+
+            assert_eq!(principal.user, expected_user);
+        }
+    }
+
+    #[tokio::test]
     async fn rejects_token_verification_failure() {
         let service = JwtAuthenticationService::new(
             Verifier(Err(AuthenticationError::Unauthorized)),
             Sessions(Ok(Some(session()))),
-            Users(Ok(Some(user(vec![UserRole::Challenger])))),
+            Users(Ok(Some(user(UserRole::Challenger, Vec::new())))),
         );
 
         assert_eq!(
@@ -321,7 +337,7 @@ mod tests {
         let service = JwtAuthenticationService::new(
             Verifier(Ok(oversized_claims)),
             Sessions(Ok(Some(matching_session))),
-            Users(Ok(Some(user(vec![UserRole::Challenger])))),
+            Users(Ok(Some(user(UserRole::Challenger, Vec::new())))),
         );
 
         assert_eq!(
@@ -337,7 +353,7 @@ mod tests {
         assert_eq!(
             service(
                 Err(database_error()),
-                Ok(Some(user(vec![UserRole::Challenger]))),
+                Ok(Some(user(UserRole::Challenger, Vec::new()))),
             )
             .authenticate("token")
             .await,

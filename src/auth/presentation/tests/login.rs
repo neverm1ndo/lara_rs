@@ -91,7 +91,7 @@ async fn issued_token_is_rejected_after_session_revocation_or_expiration() {
 async fn issued_token_is_rejected_after_user_loses_work_group() {
     let (app, _sessions, users) = integrated_app();
     let token = login_through_http(&app).await;
-    users.remove_work_groups();
+    users.remove_from_workspace();
 
     let response = validate_session_through_http(app, &token).await;
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);

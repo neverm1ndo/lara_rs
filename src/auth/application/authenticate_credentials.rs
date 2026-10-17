@@ -74,7 +74,7 @@ where
         if !self
             .password_verifier
             .verify(password, &login_user.password_hash)
-            || !is_user_in_work_group(&login_user.permissions)
+            || !is_user_in_work_group(login_user.main_group, &login_user.permissions)
         {
             return Err(CredentialAuthenticationError::InvalidCredentials);
         }
@@ -144,11 +144,11 @@ mod tests {
         }
     }
 
-    fn login_user(permissions: Vec<UserRole>) -> LoginUser {
+    fn login_user(main_group: UserRole, permissions: Vec<UserRole>) -> LoginUser {
         LoginUser {
             id: UserId::new(42).unwrap(),
             username: "neo".into(),
-            main_group: UserRole::Admin,
+            main_group,
             permissions,
             avatar: None,
             password_hash: "stored-hash".into(),
@@ -159,7 +159,10 @@ mod tests {
     async fn authenticates_valid_credentials_and_returns_safe_user() {
         let service = CredentialAuthenticationService::new(
             Passwords::default(),
-            Users(UserResult::Found(login_user(vec![UserRole::Admin]))),
+            Users(UserResult::Found(login_user(
+                UserRole::Admin,
+                vec![UserRole::Admin],
+            ))),
         );
 
         let verified = service
@@ -174,7 +177,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hides_missing_user_wrong_password_and_missing_work_group() {
+    async fn hides_missing_user_and_wrong_password() {
         let missing_passwords = Passwords::default();
         let missing_service = CredentialAuthenticationService::new(
             missing_passwords.clone(),
@@ -190,7 +193,10 @@ mod tests {
 
         let wrong_password = CredentialAuthenticationService::new(
             Passwords::default(),
-            Users(UserResult::Found(login_user(vec![UserRole::Admin]))),
+            Users(UserResult::Found(login_user(
+                UserRole::Admin,
+                vec![UserRole::Admin],
+            ))),
         );
         assert_eq!(
             wrong_password
@@ -198,17 +204,31 @@ mod tests {
                 .await,
             Err(CredentialAuthenticationError::InvalidCredentials)
         );
+    }
 
-        let no_work_group = CredentialAuthenticationService::new(
-            Passwords::default(),
-            Users(UserResult::Found(login_user(Vec::new()))),
-        );
-        assert_eq!(
-            no_work_group
+    #[tokio::test]
+    async fn accepts_workspace_main_group_when_permissions_are_empty() {
+        for main_group in [
+            UserRole::Challenger,
+            UserRole::Developer,
+            UserRole::Admin,
+            UserRole::Mapper,
+            UserRole::Configurator,
+            UserRole::Backuper,
+        ] {
+            let service = CredentialAuthenticationService::new(
+                Passwords::default(),
+                Users(UserResult::Found(login_user(main_group, Vec::new()))),
+            );
+
+            let verified = service
                 .authenticate("neo@example.com", "correct")
-                .await,
-            Err(CredentialAuthenticationError::InvalidCredentials)
-        );
+                .await
+                .unwrap();
+
+            assert_eq!(verified.user.main_group, main_group);
+            assert!(verified.user.permissions.is_empty());
+        }
     }
 
     #[tokio::test]

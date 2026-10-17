@@ -268,11 +268,11 @@ impl SessionRepository for SharedSessions {
 }
 
 #[derive(Clone)]
-pub(super) struct SharedUsers(Arc<Mutex<LoginUser>>);
+pub(super) struct SharedUsers(Arc<Mutex<Option<LoginUser>>>);
 
 impl SharedUsers {
-    pub(super) fn remove_work_groups(&self) {
-        self.0.lock().unwrap().permissions.clear();
+    pub(super) fn remove_from_workspace(&self) {
+        *self.0.lock().unwrap() = None;
     }
 }
 
@@ -283,7 +283,7 @@ impl LoginUserRepository for SharedUsers {
         &self,
         _email: &str,
     ) -> impl Future<Output = Result<Option<LoginUser>, Self::Error>> + Send {
-        future::ready(Ok(Some(self.0.lock().unwrap().clone())))
+        future::ready(Ok(self.0.lock().unwrap().clone()))
     }
 }
 
@@ -294,9 +294,13 @@ impl AuthenticatedUserRepository for SharedUsers {
         &self,
         user_id: i32,
     ) -> impl Future<Output = Result<Option<AuthenticatedUser>, Self::Error>> + Send {
-        let login_user = self.0.lock().unwrap().clone();
-        let user = (login_user.id.get() == i64::from(user_id))
-            .then(|| login_user.into_authenticated_user());
+        let user = self
+            .0
+            .lock()
+            .unwrap()
+            .clone()
+            .filter(|login_user| login_user.id.get() == i64::from(user_id))
+            .map(LoginUser::into_authenticated_user);
         future::ready(Ok(user))
     }
 }
@@ -324,14 +328,14 @@ pub(super) fn integrated_app() -> (Router, SharedSessions, SharedUsers) {
     const AUDIENCE: &str = "lara-api";
 
     let sessions = SharedSessions::default();
-    let users = SharedUsers(Arc::new(Mutex::new(LoginUser {
+    let users = SharedUsers(Arc::new(Mutex::new(Some(LoginUser {
         id: UserId::new(42).unwrap(),
         username: "neo".into(),
         main_group: UserRole::Admin,
         permissions: vec![UserRole::Challenger, UserRole::Admin],
         avatar: None,
         password_hash: legacy_hash("random-salt", "correct"),
-    })));
+    }))));
     let login = LoginService::new(
         LegacyMd5Verifier,
         users.clone(),
