@@ -63,6 +63,7 @@ pub trait MfaFactorRepository: Send + Sync {
         user_id: UserId,
         enrollment_id: MfaEnrollmentId,
         now: DateTime<Utc>,
+        accepted_step: u64,
         recovery_code_hashes: &'a [RecoveryCodeHash],
     ) -> MfaRepositoryFuture<'a, AtomicMfaUpdate>;
 

@@ -107,6 +107,7 @@ impl MfaFactorRepository for MongoMfaFactorRepository {
         user_id: UserId,
         enrollment_id: MfaEnrollmentId,
         now: DateTime<Utc>,
+        accepted_step: u64,
         recovery_code_hashes: &'a [RecoveryCodeHash],
     ) -> MfaRepositoryFuture<'a, AtomicMfaUpdate> {
         Box::pin(async move {
@@ -117,6 +118,7 @@ impl MfaFactorRepository for MongoMfaFactorRepository {
                 .iter()
                 .map(|hash| hash.as_str().to_owned())
                 .collect::<Vec<_>>();
+            let accepted_step = u64_to_i64(accepted_step, "last_accepted_step")?;
             let result = self
                 .factors
                 .update_one(
@@ -130,6 +132,7 @@ impl MfaFactorRepository for MongoMfaFactorRepository {
                         "$set": {
                             "status": "active",
                             "enabled_at": to_bson_datetime(now),
+                            "last_accepted_step": accepted_step,
                             "recovery_code_hashes": hashes
                         },
                         "$unset": { "pending_expires_at": "" }
