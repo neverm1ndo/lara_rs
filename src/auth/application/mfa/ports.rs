@@ -14,6 +14,8 @@ use crate::auth::domain::{
 
 pub type MfaRepositoryFuture<'a, T> =
     Pin<Box<dyn Future<Output = Result<T, MfaRepositoryError>> + Send + 'a>>;
+pub type MfaSecurityFuture<'a, T> =
+    Pin<Box<dyn Future<Output = Result<T, MfaSecurityError>> + Send + 'a>>;
 
 /// Persistence representation used by MFA application services. Pending
 /// expiry and recovery hashes are kept outside the core factor lifecycle but
@@ -140,9 +142,17 @@ pub trait TotpSecretGenerator: Send + Sync {
 /// Encrypts TOTP seeds before persistence and decrypts them only for bounded
 /// enrollment/verification operations.
 pub trait TotpSecretCipher: Send + Sync {
-    fn encrypt(&self, secret: &TotpSecret) -> Result<EncryptedTotpSecret, MfaSecurityError>;
+    fn encrypt(
+        &self,
+        user_id: UserId,
+        secret: &TotpSecret,
+    ) -> Result<EncryptedTotpSecret, MfaSecurityError>;
 
-    fn decrypt(&self, secret: &EncryptedTotpSecret) -> Result<TotpSecret, MfaSecurityError>;
+    fn decrypt(
+        &self,
+        user_id: UserId,
+        secret: &EncryptedTotpSecret,
+    ) -> Result<TotpSecret, MfaSecurityError>;
 
     fn key_version(&self) -> u32;
 }
@@ -174,13 +184,13 @@ pub trait RecoveryCodeGenerator: Send + Sync {
 }
 
 pub trait RecoveryCodeHasher: Send + Sync {
-    fn hash(&self, code: &RecoveryCode) -> Result<RecoveryCodeHash, MfaSecurityError>;
+    fn hash<'a>(&'a self, code: &'a RecoveryCode) -> MfaSecurityFuture<'a, RecoveryCodeHash>;
 
-    fn verify(
-        &self,
-        code: &RecoveryCode,
-        hash: &RecoveryCodeHash,
-    ) -> Result<bool, MfaSecurityError>;
+    fn verify<'a>(
+        &'a self,
+        code: &'a RecoveryCode,
+        hash: &'a RecoveryCodeHash,
+    ) -> MfaSecurityFuture<'a, bool>;
 }
 
 /// Injectable wall clock used by MFA use cases and deterministic tests.

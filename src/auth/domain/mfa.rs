@@ -3,6 +3,7 @@ use std::{fmt, str::FromStr};
 use chrono::{DateTime, Utc};
 use thiserror::Error;
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use super::models::UserId;
 
@@ -120,6 +121,12 @@ impl fmt::Debug for TotpSecret {
     }
 }
 
+impl Drop for TotpSecret {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
+
 /// Opaque token returned to the client for the second login step.
 #[derive(Clone, PartialEq, Eq)]
 pub struct MfaChallengeToken(String);
@@ -141,6 +148,12 @@ impl MfaChallengeToken {
 impl fmt::Debug for MfaChallengeToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("MfaChallengeToken([REDACTED])")
+    }
+}
+
+impl Drop for MfaChallengeToken {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
@@ -217,6 +230,12 @@ impl RecoveryCode {
 impl fmt::Debug for RecoveryCode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("RecoveryCode([REDACTED])")
+    }
+}
+
+impl Drop for RecoveryCode {
+    fn drop(&mut self) {
+        self.0.zeroize();
     }
 }
 
