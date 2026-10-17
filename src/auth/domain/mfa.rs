@@ -96,6 +96,68 @@ impl EncryptedTotpSecret {
     }
 }
 
+/// Plaintext TOTP seed. It must only exist transiently while enrolling or
+/// verifying a factor and must never be persisted or logged.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TotpSecret(Vec<u8>);
+
+impl TotpSecret {
+    pub fn new(value: Vec<u8>) -> Result<Self, InvalidMfaValue> {
+        if value.is_empty() {
+            return Err(InvalidMfaValue::EmptyTotpSecret);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for TotpSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("TotpSecret([REDACTED])")
+    }
+}
+
+/// Opaque token returned to the client for the second login step.
+#[derive(Clone, PartialEq, Eq)]
+pub struct MfaChallengeToken(String);
+
+impl MfaChallengeToken {
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidMfaValue> {
+        let value = value.into();
+        if value.trim().is_empty() || value.trim() != value {
+            return Err(InvalidMfaValue::ChallengeToken);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for MfaChallengeToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("MfaChallengeToken([REDACTED])")
+    }
+}
+
+/// Fixed-size digest persisted instead of the bearer challenge token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MfaChallengeTokenHash([u8; 32]);
+
+impl MfaChallengeTokenHash {
+    pub const fn new(value: [u8; 32]) -> Self {
+        Self(value)
+    }
+
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
 impl fmt::Debug for EncryptedTotpSecret {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("EncryptedTotpSecret([REDACTED])")
@@ -155,6 +217,31 @@ impl RecoveryCode {
 impl fmt::Debug for RecoveryCode {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("RecoveryCode([REDACTED])")
+    }
+}
+
+/// Self-describing, salted one-way recovery-code hash (for example PHC
+/// format). The encoded hash is sensitive metadata and is redacted in logs.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RecoveryCodeHash(String);
+
+impl RecoveryCodeHash {
+    pub fn new(value: impl Into<String>) -> Result<Self, InvalidMfaValue> {
+        let value = value.into();
+        if value.trim().is_empty() || value.trim() != value {
+            return Err(InvalidMfaValue::RecoveryCodeHash);
+        }
+        Ok(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for RecoveryCodeHash {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("RecoveryCodeHash([REDACTED])")
     }
 }
 
@@ -372,14 +459,20 @@ impl MfaLoginChallenge {
 
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 pub enum InvalidMfaValue {
+    #[error("TOTP secret must not be empty")]
+    EmptyTotpSecret,
     #[error("encrypted TOTP secret must not be empty")]
     EmptyEncryptedSecret,
+    #[error("MFA challenge token must not be blank or padded with whitespace")]
+    ChallengeToken,
     #[error("encryption key version must be positive")]
     EncryptionKeyVersion,
     #[error("TOTP code must contain six to eight ASCII digits")]
     TotpCode,
     #[error("recovery code has an invalid format")]
     RecoveryCode,
+    #[error("recovery code hash must not be blank or padded with whitespace")]
+    RecoveryCodeHash,
     #[error("verification attempt limit must be positive")]
     VerificationAttempts,
     #[error("MFA challenge expiration must be after its creation")]
@@ -419,13 +512,19 @@ mod tests {
 
     #[test]
     fn sensitive_values_validate_input_and_redact_debug_output() {
+        let plaintext_secret = TotpSecret::new(vec![4, 5, 6]).unwrap();
         let secret = EncryptedTotpSecret::new(vec![1, 2, 3]).unwrap();
+        let token = MfaChallengeToken::new("opaque-token").unwrap();
         let totp = TotpCode::new("012345").unwrap();
         let recovery = RecoveryCode::new("ABCD-EFGH").unwrap();
+        let recovery_hash = RecoveryCodeHash::new("$hash$encoded").unwrap();
 
+        assert_eq!(format!("{plaintext_secret:?}"), "TotpSecret([REDACTED])");
         assert_eq!(format!("{secret:?}"), "EncryptedTotpSecret([REDACTED])");
+        assert_eq!(format!("{token:?}"), "MfaChallengeToken([REDACTED])");
         assert_eq!(format!("{totp:?}"), "TotpCode([REDACTED])");
         assert_eq!(format!("{recovery:?}"), "RecoveryCode([REDACTED])");
+        assert_eq!(format!("{recovery_hash:?}"), "RecoveryCodeHash([REDACTED])");
         assert_eq!(TotpCode::new("12345"), Err(InvalidMfaValue::TotpCode));
         assert_eq!(TotpCode::new("12345a"), Err(InvalidMfaValue::TotpCode));
         assert_eq!(
