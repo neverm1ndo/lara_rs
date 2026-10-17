@@ -28,6 +28,14 @@ TOML, а секреты и точечные переопределения пе�
 | `jwt.issuer` | `LARA_JWT__ISSUER` |
 | `jwt.audience` | `LARA_JWT__AUDIENCE` |
 | `jwt.ttl_seconds` | `LARA_JWT__TTL_SECONDS` |
+| `mfa.encryption_key` | `LARA_MFA__ENCRYPTION_KEY` |
+| `mfa.issuer` | `LARA_MFA__ISSUER` |
+| `mfa.challenge_ttl_seconds` | `LARA_MFA__CHALLENGE_TTL_SECONDS` |
+| `mfa.enrollment_ttl_seconds` | `LARA_MFA__ENROLLMENT_TTL_SECONDS` |
+| `mfa.max_verification_attempts` | `LARA_MFA__MAX_VERIFICATION_ATTEMPTS` |
+| `mfa.totp_period_seconds` | `LARA_MFA__TOTP_PERIOD_SECONDS` |
+| `mfa.totp_digits` | `LARA_MFA__TOTP_DIGITS` |
+| `mfa.allowed_clock_skew_steps` | `LARA_MFA__ALLOWED_CLOCK_SKEW_STEPS` |
 | `mysql.url` | `LARA_MYSQL__URL` |
 | `mongodb.uri` | `LARA_MONGODB__URI` |
 | `mongodb.database` | `LARA_MONGODB__DATABASE` |
@@ -84,6 +92,15 @@ issuer = "lara-production"
 audience = "lara-api"
 ttl_seconds = 1800
 
+[mfa]
+issuer = "Lara"
+challenge_ttl_seconds = 300
+enrollment_ttl_seconds = 600
+max_verification_attempts = 5
+totp_period_seconds = 30
+totp_digits = 6
+allowed_clock_skew_steps = 1
+
 [mongodb]
 database = "lara"
 
@@ -128,17 +145,30 @@ max_input_size_bytes = 10485760
 generation_timeout_ms = 5000
 ```
 
-`jwt.secret`, `mysql.url` и `mongodb.uri` рекомендуется передавать только
-через окружение или secret manager. Не добавляйте production-секреты в TOML
-или `.env.example`.
+`jwt.secret`, `mfa.encryption_key`, `mysql.url` и `mongodb.uri` рекомендуется
+передавать только через окружение или secret manager. Не добавляйте
+production-секреты в TOML или `.env.example`. Ключ MFA — это ровно 32 случайных
+байта, записанных 64 шестнадцатеричными символами.
 
 ## Проверка при запуске
 
 До подключения к базам данных сервер проверяет обязательные строки, диапазон
-JWT TTL (60–86400 секунд), минимальную длину HS256-секрета (32 байта), лимиты
-файлового хранилища, относительные пути, расширения и имена бинарных файлов,
-исключённые ветки дерева и fallback-кодировку. Секреты скрываются в
-`Debug`-выводе.
+JWT TTL (60–86400 секунд), минимальную длину HS256-секрета (32 байта), формат
+ключа шифрования MFA, параметры TOTP и MFA challenge, лимиты файлового
+хранилища, относительные пути, расширения и имена бинарных файлов, исключённые
+ветки дерева и fallback-кодировку. Секреты скрываются в `Debug`-выводе.
+
+## Опциональная MFA
+
+MFA остаётся добровольной для всех ролей. Настройки `mfa` определяют только
+параметры TOTP и короткоживущих login/enrollment challenge; они не включают MFA
+глобально и не делают её обязательной для отдельных групп.
+
+`challenge_ttl_seconds` допускает 60–900 секунд, `enrollment_ttl_seconds` —
+60–3600 секунд, `max_verification_attempts` — 1–10. Период TOTP ограничен
+15–300 секундами, число цифр может быть 6 или 8, а допустимое расхождение часов
+— от 0 до 2 временных интервалов. Для совместимости рекомендуются значения
+30 секунд, 6 цифр и окно ±1 интервал из `default.toml`.
 
 Каталог `maps.files.directory` задаётся относительно
 `game_server.storage.root`. Лимит одного файла карты не может превышать

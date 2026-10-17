@@ -11,10 +11,30 @@ use crate::{
     app_state::AppState,
     auth::{
         self,
-        application::{authenticate_jwt::JwtAuthenticationService, login::LoginService},
+        application::{
+            authenticate_jwt::{JwtAuthenticationService, SessionProtectionPolicy},
+            login::AuthenticatedSessionIssuer,
+            mfa::{
+                login::MfaLoginService,
+                management::MfaManagementService,
+                ports::{
+                    MfaChallengeRepository, MfaChallengeTokenGenerator, MfaChallengeTokenHasher,
+                    MfaClock, MfaFactorRepository, RecoveryCodeGenerator, RecoveryCodeHasher,
+                    TotpSecretCipher, TotpSecretGenerator, TotpVerifier,
+                },
+                session_policy::MfaSessionProtectionPolicy,
+                verification::MfaFactorVerificationService,
+            },
+        },
         infrastructure::{
             jwt::{Hs256JwtIssuer, Hs256JwtVerifier},
             legacy_md5_verifier::LegacyMd5Verifier,
+            mfa_repository::{MongoMfaChallengeRepository, MongoMfaFactorRepository},
+            mfa_security::{
+                Aes256GcmTotpSecretCipher, Argon2RecoveryCodeHasher, OsMfaChallengeTokenGenerator,
+                OsRecoveryCodeGenerator, OsTotpSecretGenerator, Rfc6238TotpVerifier,
+                Sha256MfaChallengeTokenHasher, SystemMfaClock,
+            },
             session_id_generator::UuidSessionIdGenerator,
             session_repository::MongoSessionRepository,
         },
@@ -63,6 +83,7 @@ use crate::{
 };
 
 type BootstrapError = Box<dyn Error + Send + Sync>;
+const CURRENT_MFA_ENCRYPTION_KEY_VERSION: u32 = 1;
 
 pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let bind_address = config.server.bind_address;
@@ -110,6 +131,39 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
 
     let sessions = MongoSessionRepository::new(mongo_database.clone());
     sessions.ensure_indexes().await?;
+
+    let mfa_factor_repository = MongoMfaFactorRepository::new(mongo_database.clone());
+    mfa_factor_repository.ensure_indexes().await?;
+    let mfa_challenge_repository = MongoMfaChallengeRepository::new(mongo_database.clone());
+    mfa_challenge_repository.ensure_indexes().await?;
+    let mfa_factors: Arc<dyn MfaFactorRepository> = Arc::new(mfa_factor_repository);
+    let mfa_challenges: Arc<dyn MfaChallengeRepository> = Arc::new(mfa_challenge_repository);
+
+    let totp_secret_generator: Arc<dyn TotpSecretGenerator> = Arc::new(OsTotpSecretGenerator);
+    let totp_cipher: Arc<dyn TotpSecretCipher> = Arc::new(Aes256GcmTotpSecretCipher::from_hex(
+        config.mfa.encryption_key.expose_secret(),
+        CURRENT_MFA_ENCRYPTION_KEY_VERSION,
+    )?);
+    let totp_verifier: Arc<dyn TotpVerifier> = Arc::new(Rfc6238TotpVerifier::new(
+        config.mfa.totp_period_seconds,
+        config.mfa.totp_digits,
+        config.mfa.allowed_clock_skew_steps,
+    )?);
+    let challenge_tokens: Arc<dyn MfaChallengeTokenGenerator> =
+        Arc::new(OsMfaChallengeTokenGenerator);
+    let challenge_hasher: Arc<dyn MfaChallengeTokenHasher> =
+        Arc::new(Sha256MfaChallengeTokenHasher);
+    let recovery_codes: Arc<dyn RecoveryCodeGenerator> = Arc::new(OsRecoveryCodeGenerator);
+    let recovery_hasher: Arc<dyn RecoveryCodeHasher> =
+        Arc::new(Argon2RecoveryCodeHasher::default());
+    let mfa_clock: Arc<dyn MfaClock> = Arc::new(SystemMfaClock);
+    let factor_verification = Arc::new(MfaFactorVerificationService::new(
+        Arc::clone(&mfa_factors),
+        Arc::clone(&totp_cipher),
+        Arc::clone(&totp_verifier),
+        Arc::clone(&recovery_hasher),
+        Arc::clone(&mfa_clock),
+    ));
 
     let backup_repository = Arc::new(MongoBackupRepository::new(mongo_database));
     backup_repository.ensure_indexes().await?;
@@ -192,22 +246,54 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let authenticated_users = SeaOrmAuthenticatedUserRepository::new(mysql.clone());
     let user_profiles = SeaOrmUserProfileRepository::new(mysql.clone());
     let login_users = SeaOrmLoginUserRepository::new(mysql);
-    let authenticator =
-        JwtAuthenticationService::new(verifier, sessions.clone(), authenticated_users);
+    let session_protection: Arc<dyn SessionProtectionPolicy> =
+        Arc::new(MfaSessionProtectionPolicy::new(Arc::clone(&mfa_factors)));
+    let authenticator = JwtAuthenticationService::with_protection_policy(
+        verifier,
+        sessions.clone(),
+        authenticated_users.clone(),
+        session_protection,
+    );
     let get_user_service = GetUserService::new(user_profiles);
-    let login_service = LoginService::new(
-        LegacyMd5Verifier,
-        login_users,
-        sessions,
+    let session_issuer = AuthenticatedSessionIssuer::new(
+        sessions.clone(),
         UuidSessionIdGenerator,
         issuer,
-        config.jwt.issuer,
-        config.jwt.audience,
+        config.jwt.issuer.clone(),
+        config.jwt.audience.clone(),
         config.jwt.ttl_seconds,
+    )?;
+    let mfa_login_service = MfaLoginService::new(
+        LegacyMd5Verifier,
+        login_users,
+        authenticated_users.clone(),
+        session_issuer,
+        Arc::clone(&mfa_factors),
+        Arc::clone(&mfa_challenges),
+        challenge_tokens,
+        challenge_hasher,
+        Arc::clone(&factor_verification),
+        Arc::clone(&mfa_clock),
+        config.mfa.challenge_ttl_seconds,
+        config.mfa.max_verification_attempts,
+    )?;
+    let mfa_management_service = MfaManagementService::new(
+        mfa_factors,
+        totp_secret_generator,
+        totp_cipher,
+        totp_verifier,
+        recovery_codes,
+        recovery_hasher,
+        mfa_clock,
+        config.mfa.issuer,
+        config.mfa.enrollment_ttl_seconds,
+        config.mfa.totp_period_seconds,
+        config.mfa.totp_digits,
     )?;
     let state = AppState::new(
         authenticator,
-        login_service,
+        mfa_login_service,
+        mfa_management_service,
         get_user_service,
         configurator_directory,
         maps_file_service,
@@ -218,7 +304,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let openapi = base_openapi_document();
 
     let (router, openapi) = OpenApiRouter::<AppState>::with_openapi(openapi)
-        .nest("/auth", auth::presentation::router::<AppState>())
+        .nest("/auth", auth::presentation::mfa_router::<AppState>())
         .nest("/maps", maps::presentation::router::<AppState>())
         .nest("/backups", backups::presentation::router::<AppState>())
         .nest("/user", user::presentation::router::<AppState>())
@@ -253,8 +339,11 @@ mod tests {
     use super::*;
     use crate::{
         auth::{
-            application::{authenticate_jwt::AuthenticateBearerToken, login::Login},
-            presentation::{extractors::JwtExtractorState, state::LoginState},
+            application::{
+                authenticate_jwt::AuthenticateBearerToken,
+                mfa::{login::MfaLogin, management::ManageMfa},
+            },
+            presentation::{extractors::JwtExtractorState, state::MfaState},
         },
         backups::{
             application::lifecycle::BackupLifecycleService, presentation::state::BackupsState,
@@ -273,8 +362,12 @@ mod tests {
         }
     }
 
-    impl LoginState for DocumentationState {
-        fn login_service(&self) -> Arc<dyn Login> {
+    impl MfaState for DocumentationState {
+        fn mfa_login_service(&self) -> Arc<dyn MfaLogin> {
+            panic!("documentation generation does not resolve application services")
+        }
+
+        fn mfa_management_service(&self) -> Arc<dyn ManageMfa> {
             panic!("documentation generation does not resolve application services")
         }
     }
@@ -304,7 +397,7 @@ mod tests {
     #[test]
     fn global_openapi_document_contains_domain_routes() {
         let document = OpenApiRouter::<DocumentationState>::with_openapi(base_openapi_document())
-            .nest("/auth", auth::presentation::router())
+            .nest("/auth", auth::presentation::mfa_router())
             .nest("/maps", maps::presentation::router())
             .nest("/backups", backups::presentation::router())
             .nest("/user", user::presentation::router())
@@ -314,6 +407,9 @@ mod tests {
         assert_eq!(specification["openapi"], "3.1.0");
         assert!(specification["paths"]["/auth/login"]["post"].is_object());
         assert!(specification["paths"]["/auth/session"]["get"].is_object());
+        assert!(specification["paths"]["/auth/login/mfa"]["post"].is_object());
+        assert!(specification["paths"]["/auth/mfa"]["get"].is_object());
+        assert!(specification["paths"]["/auth/mfa/totp"]["delete"].is_object());
         assert!(specification["paths"]["/maps/tree"]["get"].is_object());
         assert!(specification["paths"]["/maps/files"]["post"].is_object());
         assert!(specification["paths"]["/backups/list"]["get"].is_object());

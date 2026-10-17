@@ -194,6 +194,14 @@ impl SessionRepository for SessionStore {
     ) -> impl Future<Output = Result<Option<Session>, Self::Error>> + Send {
         future::ready(Ok(Some(self.0.clone())))
     }
+
+    fn revoke(
+        &self,
+        _session_id: &SessionId,
+        _revoked_at: chrono::DateTime<Utc>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        future::ready(Ok(()))
+    }
 }
 
 struct UserStore(AuthenticatedUser);
@@ -233,6 +241,7 @@ pub(super) fn active_session() -> Session {
         user_id: UserId::new(42).unwrap(),
         expires_at: Utc::now() + Duration::minutes(5),
         revoked_at: None,
+        authentication_method: crate::auth::domain::mfa::AuthenticationMethod::Password,
     }
 }
 
@@ -264,6 +273,17 @@ impl SessionRepository for SharedSessions {
     ) -> impl Future<Output = Result<Option<Session>, Self::Error>> + Send {
         let session = self.0.lock().unwrap().get(session_id.as_str()).cloned();
         future::ready(Ok(session))
+    }
+
+    fn revoke(
+        &self,
+        session_id: &SessionId,
+        revoked_at: chrono::DateTime<Utc>,
+    ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+        if let Some(session) = self.0.lock().unwrap().get_mut(session_id.as_str()) {
+            session.revoked_at = Some(revoked_at);
+        }
+        future::ready(Ok(()))
     }
 }
 

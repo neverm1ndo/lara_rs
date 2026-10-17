@@ -2,9 +2,132 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::auth::{
-    application::login::LoginResult,
+    application::{
+        login::LoginResult,
+        mfa::{
+            login::{MfaChallengeResult, MfaLoginResult},
+            management::{MfaActivation, MfaStatus, TotpEnrollment},
+        },
+    },
     domain::models::{AuthenticatedPrincipal, AuthenticatedUser},
 };
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CompleteMfaLoginRequest {
+    pub challenge_token: String,
+    pub totp_code: Option<String>,
+    pub recovery_code: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum MfaLoginResponse {
+    Authenticated(LoginResponse),
+    MfaRequired(MfaChallengeResponse),
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MfaChallengeResponse {
+    pub mfa_required: bool,
+    pub challenge_token: String,
+    /// RFC 3339 UTC timestamp.
+    pub expires_at: String,
+}
+
+impl From<MfaLoginResult> for MfaLoginResponse {
+    fn from(result: MfaLoginResult) -> Self {
+        match result {
+            MfaLoginResult::Authenticated(login) => Self::Authenticated(login.into()),
+            MfaLoginResult::MfaRequired(challenge) => Self::MfaRequired(challenge.into()),
+        }
+    }
+}
+
+impl From<MfaChallengeResult> for MfaChallengeResponse {
+    fn from(result: MfaChallengeResult) -> Self {
+        Self {
+            mfa_required: true,
+            challenge_token: result.challenge_token.as_str().to_owned(),
+            expires_at: result.expires_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MfaStatusResponse {
+    pub status: String,
+    pub enabled: bool,
+}
+
+impl From<MfaStatus> for MfaStatusResponse {
+    fn from(status: MfaStatus) -> Self {
+        let (status, enabled) = match status {
+            MfaStatus::Disabled => ("disabled", false),
+            MfaStatus::EnrollmentPending => ("enrollment_pending", false),
+            MfaStatus::Enabled => ("enabled", true),
+        };
+        Self {
+            status: status.into(),
+            enabled,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TotpEnrollmentResponse {
+    pub enrollment_id: String,
+    pub secret: String,
+    pub provisioning_uri: String,
+    /// RFC 3339 UTC timestamp.
+    pub expires_at: String,
+}
+
+impl From<TotpEnrollment> for TotpEnrollmentResponse {
+    fn from(enrollment: TotpEnrollment) -> Self {
+        Self {
+            enrollment_id: enrollment.enrollment_id.to_string(),
+            secret: enrollment.secret,
+            provisioning_uri: enrollment.provisioning_uri,
+            expires_at: enrollment.expires_at.to_rfc3339(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfirmTotpEnrollmentRequest {
+    pub enrollment_id: String,
+    pub code: String,
+}
+
+#[derive(Debug, Deserialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct MfaProofRequest {
+    pub totp_code: Option<String>,
+    pub recovery_code: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RecoveryCodesResponse {
+    pub recovery_codes: Vec<String>,
+}
+
+impl From<MfaActivation> for RecoveryCodesResponse {
+    fn from(activation: MfaActivation) -> Self {
+        Self {
+            recovery_codes: activation
+                .recovery_codes
+                .iter()
+                .map(|code| code.as_str().to_owned())
+                .collect(),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]

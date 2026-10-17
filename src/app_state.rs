@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use crate::auth::{
-    application::{authenticate_jwt::AuthenticateBearerToken, login::Login},
-    presentation::{extractors::JwtExtractorState, state::LoginState},
+    application::{
+        authenticate_jwt::AuthenticateBearerToken,
+        mfa::{login::MfaLogin, management::ManageMfa},
+    },
+    presentation::{extractors::JwtExtractorState, state::MfaState},
 };
 use crate::{
     backups::{application::lifecycle::BackupLifecycleService, presentation::state::BackupsState},
@@ -15,7 +18,8 @@ use crate::{
 #[derive(Clone)]
 pub struct AppState {
     jwt_authenticator: Arc<dyn AuthenticateBearerToken>,
-    login_service: Arc<dyn Login>,
+    mfa_login_service: Arc<dyn MfaLogin>,
+    mfa_management_service: Arc<dyn ManageMfa>,
     get_user_service: Arc<dyn GetUser>,
     configurator_directory: RelativeStoragePath,
     maps_file_service: Arc<dyn MapsFileService>,
@@ -24,9 +28,11 @@ pub struct AppState {
 }
 
 impl AppState {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         authenticator: impl AuthenticateBearerToken + 'static,
-        login_service: impl Login + 'static,
+        mfa_login_service: impl MfaLogin + 'static,
+        mfa_management_service: impl ManageMfa + 'static,
         get_user_service: impl GetUser + 'static,
         configurator_directory: RelativeStoragePath,
         maps_file_service: impl MapsFileService + 'static,
@@ -35,7 +41,8 @@ impl AppState {
     ) -> Self {
         Self {
             jwt_authenticator: Arc::new(authenticator),
-            login_service: Arc::new(login_service),
+            mfa_login_service: Arc::new(mfa_login_service),
+            mfa_management_service: Arc::new(mfa_management_service),
             get_user_service: Arc::new(get_user_service),
             configurator_directory,
             maps_file_service: Arc::new(maps_file_service),
@@ -57,9 +64,13 @@ impl BackupsState for AppState {
     }
 }
 
-impl LoginState for AppState {
-    fn login_service(&self) -> Arc<dyn Login> {
-        Arc::clone(&self.login_service)
+impl MfaState for AppState {
+    fn mfa_login_service(&self) -> Arc<dyn MfaLogin> {
+        Arc::clone(&self.mfa_login_service)
+    }
+
+    fn mfa_management_service(&self) -> Arc<dyn ManageMfa> {
+        Arc::clone(&self.mfa_management_service)
     }
 }
 

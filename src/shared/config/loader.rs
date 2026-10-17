@@ -17,6 +17,16 @@ const DEFAULT_JWT_TTL_SECONDS: i64 = 3_600;
 const MIN_JWT_TTL_SECONDS: i64 = 60;
 const MAX_JWT_TTL_SECONDS: i64 = 86_400;
 const MIN_JWT_SECRET_BYTES: usize = 32;
+const MFA_ENCRYPTION_KEY_BYTES: usize = 32;
+const MIN_MFA_CHALLENGE_TTL_SECONDS: u64 = 60;
+const MAX_MFA_CHALLENGE_TTL_SECONDS: u64 = 15 * 60;
+const MIN_MFA_ENROLLMENT_TTL_SECONDS: u64 = 60;
+const MAX_MFA_ENROLLMENT_TTL_SECONDS: u64 = 60 * 60;
+const MIN_MFA_VERIFICATION_ATTEMPTS: u64 = 1;
+const MAX_MFA_VERIFICATION_ATTEMPTS: u64 = 10;
+const MIN_TOTP_PERIOD_SECONDS: u64 = 15;
+const MAX_TOTP_PERIOD_SECONDS: u64 = 5 * 60;
+const MAX_TOTP_CLOCK_SKEW_STEPS: u64 = 2;
 const MIN_TREE_DEPTH: u64 = 1;
 const MAX_TREE_DEPTH: u64 = 128;
 const MIN_TREE_ENTRIES: u64 = 1;
@@ -117,6 +127,11 @@ impl AppConfig {
         require_nonempty("jwt.secret", self.jwt.secret.expose_secret())?;
         require_nonempty("jwt.issuer", &self.jwt.issuer)?;
         require_nonempty("jwt.audience", &self.jwt.audience)?;
+        require_nonempty(
+            "mfa.encryption_key",
+            self.mfa.encryption_key.expose_secret(),
+        )?;
+        require_nonempty("mfa.issuer", &self.mfa.issuer)?;
         require_nonempty("mysql.url", self.mysql.url.expose_secret())?;
         require_nonempty("mongodb.uri", self.mongodb.uri.expose_secret())?;
         require_nonempty("mongodb.database", &self.mongodb.database)?;
@@ -133,6 +148,41 @@ impl AppConfig {
                 minimum: MIN_JWT_SECRET_BYTES,
             });
         }
+
+        validate_mfa_encryption_key(self.mfa.encryption_key.expose_secret())?;
+        require_range(
+            "mfa.challenge_ttl_seconds",
+            self.mfa.challenge_ttl_seconds,
+            MIN_MFA_CHALLENGE_TTL_SECONDS,
+            MAX_MFA_CHALLENGE_TTL_SECONDS,
+        )?;
+        require_range(
+            "mfa.enrollment_ttl_seconds",
+            self.mfa.enrollment_ttl_seconds,
+            MIN_MFA_ENROLLMENT_TTL_SECONDS,
+            MAX_MFA_ENROLLMENT_TTL_SECONDS,
+        )?;
+        require_range(
+            "mfa.max_verification_attempts",
+            u64::from(self.mfa.max_verification_attempts),
+            MIN_MFA_VERIFICATION_ATTEMPTS,
+            MAX_MFA_VERIFICATION_ATTEMPTS,
+        )?;
+        require_range(
+            "mfa.totp_period_seconds",
+            self.mfa.totp_period_seconds,
+            MIN_TOTP_PERIOD_SECONDS,
+            MAX_TOTP_PERIOD_SECONDS,
+        )?;
+        if !matches!(self.mfa.totp_digits, 6 | 8) {
+            return Err(ConfigError::InvalidMfaTotpDigits);
+        }
+        require_range(
+            "mfa.allowed_clock_skew_steps",
+            u64::from(self.mfa.allowed_clock_skew_steps),
+            0,
+            MAX_TOTP_CLOCK_SKEW_STEPS,
+        )?;
 
         parse_jwt_ttl_seconds(&self.jwt.ttl_seconds.to_string())?;
         require_range(
@@ -247,6 +297,13 @@ fn log_loaded_configuration(config: &AppConfig) {
         jwt_issuer = %config.jwt.issuer,
         jwt_audience = %config.jwt.audience,
         jwt_ttl_seconds = config.jwt.ttl_seconds,
+        mfa_issuer = %config.mfa.issuer,
+        mfa_challenge_ttl_seconds = config.mfa.challenge_ttl_seconds,
+        mfa_enrollment_ttl_seconds = config.mfa.enrollment_ttl_seconds,
+        mfa_max_verification_attempts = config.mfa.max_verification_attempts,
+        mfa_totp_period_seconds = config.mfa.totp_period_seconds,
+        mfa_totp_digits = config.mfa.totp_digits,
+        mfa_allowed_clock_skew_steps = config.mfa.allowed_clock_skew_steps,
         mongodb_database = %config.mongodb.database,
         file_storage_max_tree_depth = config.game_server.storage.max_tree_depth,
         file_storage_max_tree_entries = config.game_server.storage.max_tree_entries,
@@ -580,6 +637,16 @@ fn parse_jwt_ttl_seconds(value: &str) -> Result<i64, ConfigError> {
         .ok_or(ConfigError::InvalidJwtTtl)
 }
 
+fn validate_mfa_encryption_key(value: &str) -> Result<(), ConfigError> {
+    let expected_hex_length = MFA_ENCRYPTION_KEY_BYTES * 2;
+    if value.len() != expected_hex_length || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ConfigError::InvalidMfaEncryptionKey {
+            expected_bytes: MFA_ENCRYPTION_KEY_BYTES,
+        });
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use ::config::FileFormat;
@@ -598,6 +665,16 @@ mod tests {
                 issuer: "lara".into(),
                 audience: "lara-api".into(),
                 ttl_seconds: DEFAULT_JWT_TTL_SECONDS,
+            },
+            mfa: super::super::model::MfaConfig {
+                encryption_key: super::super::model::SecretString::new("11".repeat(32)),
+                issuer: "Lara".into(),
+                challenge_ttl_seconds: 300,
+                enrollment_ttl_seconds: 600,
+                max_verification_attempts: 5,
+                totp_period_seconds: 30,
+                totp_digits: 6,
+                allowed_clock_skew_steps: 1,
             },
             mysql: super::super::model::MySqlConfig {
                 url: super::super::model::SecretString::new("mysql://localhost/lara"),
@@ -692,6 +769,16 @@ mod tests {
                 Box::new(|config| config.jwt.audience = "".into()),
             ),
             (
+                "mfa.encryption_key",
+                Box::new(|config| {
+                    config.mfa.encryption_key = super::super::model::SecretString::new(" ")
+                }),
+            ),
+            (
+                "mfa.issuer",
+                Box::new(|config| config.mfa.issuer = "".into()),
+            ),
+            (
                 "mysql.url",
                 Box::new(|config| config.mysql.url = super::super::model::SecretString::new("")),
             ),
@@ -729,6 +816,69 @@ mod tests {
             config.validate(),
             Err(ConfigError::JwtSecretTooShort { minimum: 32 })
         ));
+    }
+
+    #[test]
+    fn validates_mfa_security_and_protocol_settings() {
+        for invalid_key in [
+            "11".repeat(31),
+            "11".repeat(33),
+            format!("{}zz", "11".repeat(31)),
+        ] {
+            let mut config = valid_config();
+            config.mfa.encryption_key = super::super::model::SecretString::new(invalid_key);
+
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidMfaEncryptionKey { expected_bytes: 32 })
+            ));
+        }
+
+        for (key, mutate) in [
+            (
+                "mfa.challenge_ttl_seconds",
+                Box::new(|config: &mut AppConfig| config.mfa.challenge_ttl_seconds = 59)
+                    as ConfigMutation,
+            ),
+            (
+                "mfa.enrollment_ttl_seconds",
+                Box::new(|config: &mut AppConfig| config.mfa.enrollment_ttl_seconds = 3_601),
+            ),
+            (
+                "mfa.max_verification_attempts",
+                Box::new(|config: &mut AppConfig| config.mfa.max_verification_attempts = 0),
+            ),
+            (
+                "mfa.totp_period_seconds",
+                Box::new(|config: &mut AppConfig| config.mfa.totp_period_seconds = 14),
+            ),
+            (
+                "mfa.allowed_clock_skew_steps",
+                Box::new(|config: &mut AppConfig| config.mfa.allowed_clock_skew_steps = 3),
+            ),
+        ] {
+            let mut config = valid_config();
+            mutate(&mut config);
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::ValueOutOfRange { key: invalid_key, .. }) if invalid_key == key
+            ));
+        }
+
+        for digits in [0, 5, 7, 9] {
+            let mut config = valid_config();
+            config.mfa.totp_digits = digits;
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidMfaTotpDigits)
+            ));
+        }
+
+        for digits in [6, 8] {
+            let mut config = valid_config();
+            config.mfa.totp_digits = digits;
+            config.validate().unwrap();
+        }
     }
 
     #[test]
@@ -1025,8 +1175,10 @@ mod tests {
             ("JWT_AUDIENCE".into(), "legacy-audience".into()),
             ("JWT_TTL_SECONDS".into(), "7200".into()),
         ]);
-        let builder =
-            ::config::Config::builder().add_source(File::from_str(defaults, FileFormat::Toml));
+        let builder = ::config::Config::builder()
+            .add_source(File::from_str(defaults, FileFormat::Toml))
+            .set_override("mfa.encryption_key", "11".repeat(32))
+            .unwrap();
         let builder =
             apply_legacy_environment_from(builder, &|name| legacy.get(name).cloned()).unwrap();
 
@@ -1073,6 +1225,7 @@ mod tests {
             ("LARA_JWT__TTL_SECONDS".into(), "1800".into()),
             ("LARA_MYSQL__URL".into(), "mysql://modern/lara".into()),
             ("LARA_MONGODB__URI".into(), "mongodb://modern:27017".into()),
+            ("LARA_MFA__ENCRYPTION_KEY".into(), "11".repeat(32)),
         ]);
         let builder =
             ::config::Config::builder().add_source(File::from_str(defaults, FileFormat::Toml));
@@ -1120,6 +1273,15 @@ mod tests {
             issuer = "lara"
             audience = "lara-api"
             ttl_seconds = 3600
+
+            [mfa]
+            issuer = "Lara"
+            challenge_ttl_seconds = 300
+            enrollment_ttl_seconds = 600
+            max_verification_attempts = 5
+            totp_period_seconds = 30
+            totp_digits = 6
+            allowed_clock_skew_steps = 1
 
             [mysql]
             url = "mysql://localhost/file"
@@ -1174,6 +1336,7 @@ mod tests {
                 "LARA_JWT__SECRET".into(),
                 "environment-secret-with-32-bytes!".into(),
             ),
+            ("LARA_MFA__ENCRYPTION_KEY".into(), "11".repeat(32)),
             ("LARA_JWT__TTL_SECONDS".into(), "7200".into()),
             (
                 "LARA_GAME_SERVER__STORAGE__MAX_TREE_DEPTH".into(),
@@ -1294,6 +1457,7 @@ mod tests {
                 "LARA_MONGODB__URI".into(),
                 "mongodb://localhost:27017".into(),
             ),
+            ("LARA_MFA__ENCRYPTION_KEY".into(), "11".repeat(32)),
         ]);
 
         let config = ::config::Config::builder()
@@ -1326,6 +1490,7 @@ mod tests {
                 "LARA_MONGODB__URI".into(),
                 "mongodb://localhost:27017".into(),
             ),
+            ("LARA_MFA__ENCRYPTION_KEY".into(), "11".repeat(32)),
         ]);
 
         let config = ::config::Config::builder()

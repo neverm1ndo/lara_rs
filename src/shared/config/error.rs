@@ -10,6 +10,12 @@ pub enum ConfigError {
     JwtSecretTooShort { minimum: usize },
     #[error("JWT TTL must be an integer between 60 and 86400 seconds")]
     InvalidJwtTtl,
+    #[error(
+        "MFA encryption key must contain exactly {expected_bytes} bytes encoded as hexadecimal"
+    )]
+    InvalidMfaEncryptionKey { expected_bytes: usize },
+    #[error("MFA TOTP digits must be either 6 or 8")]
+    InvalidMfaTotpDigits,
     #[error("configuration value `{key}` must be between {minimum} and {maximum}")]
     ValueOutOfRange {
         key: &'static str,

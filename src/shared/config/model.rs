@@ -27,6 +27,7 @@ impl fmt::Debug for SecretString {
 pub struct AppConfig {
     pub server: ServerConfig,
     pub jwt: JwtConfig,
+    pub mfa: MfaConfig,
     pub mysql: MySqlConfig,
     pub mongodb: MongoConfig,
     pub game_server: GameServerConfig,
@@ -46,6 +47,20 @@ pub struct JwtConfig {
     pub issuer: String,
     pub audience: String,
     pub ttl_seconds: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MfaConfig {
+    /// 32-byte authenticated-encryption key encoded as 64 hexadecimal
+    /// characters. It must be supplied outside the committed defaults.
+    pub encryption_key: SecretString,
+    pub issuer: String,
+    pub challenge_ttl_seconds: u64,
+    pub enrollment_ttl_seconds: u64,
+    pub max_verification_attempts: u16,
+    pub totp_period_seconds: u64,
+    pub totp_digits: usize,
+    pub allowed_clock_skew_steps: u8,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -163,6 +178,16 @@ mod tests {
                 audience: "lara-api".into(),
                 ttl_seconds: 3_600,
             },
+            mfa: MfaConfig {
+                encryption_key: SecretString::new("11".repeat(32)),
+                issuer: "Lara".into(),
+                challenge_ttl_seconds: 300,
+                enrollment_ttl_seconds: 600,
+                max_verification_attempts: 5,
+                totp_period_seconds: 30,
+                totp_digits: 6,
+                allowed_clock_skew_steps: 1,
+            },
             mysql: MySqlConfig {
                 url: SecretString::new("mysql://user:password@localhost/lara"),
             },
@@ -223,8 +248,9 @@ mod tests {
         let debug = format!("{config:?}");
 
         assert!(!debug.contains("jwt-secret"));
+        assert!(!debug.contains(&"11".repeat(32)));
         assert!(!debug.contains("user:password"));
-        assert_eq!(debug.matches("[REDACTED]").count(), 3);
+        assert_eq!(debug.matches("[REDACTED]").count(), 4);
     }
 
     #[test]
@@ -236,6 +262,16 @@ mod tests {
                 "issuer": "lara",
                 "audience": "lara-api",
                 "ttl_seconds": 3600
+            },
+            "mfa": {
+                "encryption_key": "1111111111111111111111111111111111111111111111111111111111111111",
+                "issuer": "Lara",
+                "challenge_ttl_seconds": 300,
+                "enrollment_ttl_seconds": 600,
+                "max_verification_attempts": 5,
+                "totp_period_seconds": 30,
+                "totp_digits": 6,
+                "allowed_clock_skew_steps": 1
             },
             "mysql": { "url": "mysql://localhost/lara" },
             "mongodb": {
@@ -296,6 +332,9 @@ mod tests {
         assert_eq!(config.server.bind_address.to_string(), "0.0.0.0:8080");
         assert_eq!(config.jwt.secret.expose_secret(), "jwt-secret");
         assert_eq!(config.jwt.ttl_seconds, 3_600);
+        assert_eq!(config.mfa.issuer, "Lara");
+        assert_eq!(config.mfa.challenge_ttl_seconds, 300);
+        assert_eq!(config.mfa.totp_digits, 6);
         assert_eq!(config.mysql.url.expose_secret(), "mysql://localhost/lara");
         assert_eq!(config.mongodb.database, "lara");
         assert_eq!(
