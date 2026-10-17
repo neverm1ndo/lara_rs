@@ -9,6 +9,18 @@ issuer = "lara"
 audience = "lara-api"
 ttl_seconds = 3600
 
+# Optional MFA is available to every authenticated workspace user. The
+# encryption key intentionally has no file default and must be supplied via
+# LARA_MFA__ENCRYPTION_KEY as 64 hexadecimal characters (32 bytes).
+[mfa]
+issuer = "Lara"
+challenge_ttl_seconds = 300
+enrollment_ttl_seconds = 600
+max_verification_attempts = 5
+totp_period_seconds = 30
+totp_digits = 6
+allowed_clock_skew_steps = 1
+
 [mongodb]
 database = "lara"
 
@@ -75,5 +87,6 @@ generation_timeout_ms = 5000
 # Secrets and credential-bearing connection strings intentionally do not have
 # file defaults. Supply them through:
 #   LARA_JWT__SECRET
+#   LARA_MFA__ENCRYPTION_KEY
 #   LARA_MYSQL__URL
 #   LARA_MONGODB__URI
