@@ -464,7 +464,53 @@ fn percent_encode(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use chrono::{Duration, TimeZone};
+
+    use crate::auth::application::mfa::test_support::{
+        FixedClock, MemoryMfaRepository, TestSecurity,
+    };
+
     use super::*;
+
+    fn service(repository: &Arc<MemoryMfaRepository>, clock: &FixedClock) -> MfaManagementService {
+        let security = Arc::new(TestSecurity::default());
+        MfaManagementService::new(
+            Arc::clone(repository) as Arc<dyn MfaFactorRepository>,
+            Arc::clone(&security) as Arc<dyn TotpSecretGenerator>,
+            Arc::clone(&security) as Arc<dyn TotpSecretCipher>,
+            Arc::clone(&security) as Arc<dyn TotpVerifier>,
+            Arc::clone(&security) as Arc<dyn RecoveryCodeGenerator>,
+            security as Arc<dyn RecoveryCodeHasher>,
+            Arc::new(clock.clone()),
+            "Lara",
+            600,
+            30,
+            6,
+        )
+        .unwrap()
+    }
+
+    fn user_id() -> UserId {
+        UserId::new(42).unwrap()
+    }
+
+    fn valid_code() -> TotpCode {
+        TotpCode::new("123456").unwrap()
+    }
+
+    async fn enroll(service: &MfaManagementService) -> (TotpEnrollment, MfaActivation) {
+        let enrollment = service
+            .begin_enrollment(user_id(), "neo@example.com")
+            .await
+            .unwrap();
+        let activation = service
+            .confirm_enrollment(user_id(), enrollment.enrollment_id, &valid_code())
+            .await
+            .unwrap();
+        (enrollment, activation)
+    }
 
     #[test]
     fn base32_encoding_matches_rfc_4648_without_padding() {
@@ -477,6 +523,138 @@ mod tests {
         assert_eq!(
             percent_encode("user+tag@example.com"),
             "user%2Btag%40example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn completes_enrollment_and_returns_recovery_codes_only_once() {
+        let repository = Arc::new(MemoryMfaRepository::default());
+        let clock = FixedClock::at(Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap());
+        let service = service(&repository, &clock);
+
+        assert_eq!(
+            service.status(user_id()).await.unwrap(),
+            MfaStatus::Disabled
+        );
+        let enrollment = service
+            .begin_enrollment(user_id(), "neo+tag@example.com")
+            .await
+            .unwrap();
+        assert!(enrollment.provisioning_uri.starts_with("otpauth://totp/"));
+        assert!(
+            enrollment
+                .provisioning_uri
+                .contains("neo%2Btag%40example.com")
+        );
+        assert_eq!(
+            service.status(user_id()).await.unwrap(),
+            MfaStatus::EnrollmentPending
+        );
+
+        let activation = service
+            .confirm_enrollment(user_id(), enrollment.enrollment_id, &valid_code())
+            .await
+            .unwrap();
+
+        assert_eq!(activation.recovery_codes.len(), RECOVERY_CODE_COUNT);
+        assert_eq!(service.status(user_id()).await.unwrap(), MfaStatus::Enabled);
+        let stored = repository.factor(user_id()).unwrap();
+        assert_eq!(stored.factor.status(), MfaFactorStatus::Active);
+        assert_eq!(stored.recovery_code_hashes.len(), RECOVERY_CODE_COUNT);
+        assert_eq!(
+            service
+                .confirm_enrollment(user_id(), enrollment.enrollment_id, &valid_code())
+                .await,
+            Err(MfaManagementError::Conflict)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_or_expired_enrollment_cannot_be_activated() {
+        let repository = Arc::new(MemoryMfaRepository::default());
+        let clock = FixedClock::at(Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap());
+        let service = service(&repository, &clock);
+        let enrollment = service
+            .begin_enrollment(user_id(), "neo@example.com")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            service
+                .confirm_enrollment(
+                    user_id(),
+                    enrollment.enrollment_id,
+                    &TotpCode::new("000000").unwrap(),
+                )
+                .await,
+            Err(MfaManagementError::InvalidCode)
+        );
+        assert_eq!(
+            repository.factor(user_id()).unwrap().factor.status(),
+            MfaFactorStatus::Pending
+        );
+
+        *clock.0.lock().unwrap() = enrollment.expires_at + Duration::seconds(1);
+        assert_eq!(
+            service.status(user_id()).await.unwrap(),
+            MfaStatus::Disabled
+        );
+        assert_eq!(
+            service
+                .confirm_enrollment(user_id(), enrollment.enrollment_id, &valid_code())
+                .await,
+            Err(MfaManagementError::Conflict)
+        );
+    }
+
+    #[tokio::test]
+    async fn rejects_totp_replay_and_consumes_recovery_code() {
+        let repository = Arc::new(MemoryMfaRepository::default());
+        let clock = FixedClock::at(Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap());
+        let service = service(&repository, &clock);
+        let (_, activation) = enroll(&service).await;
+
+        assert_eq!(
+            service
+                .regenerate_recovery_codes(user_id(), MfaProof::Totp(&valid_code()))
+                .await,
+            Err(MfaManagementError::InvalidCode)
+        );
+
+        let recovery = activation.recovery_codes[0].clone();
+        let regenerated = service
+            .regenerate_recovery_codes(user_id(), MfaProof::RecoveryCode(&recovery))
+            .await
+            .unwrap();
+        assert_eq!(regenerated.len(), RECOVERY_CODE_COUNT);
+        assert_eq!(
+            service
+                .regenerate_recovery_codes(user_id(), MfaProof::RecoveryCode(&recovery))
+                .await,
+            Err(MfaManagementError::InvalidCode)
+        );
+    }
+
+    #[tokio::test]
+    async fn disables_active_factor_after_fresh_totp_proof() {
+        let repository = Arc::new(MemoryMfaRepository::default());
+        let clock = FixedClock::at(Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap());
+        let service = service(&repository, &clock);
+        enroll(&service).await;
+        *clock.0.lock().unwrap() += Duration::seconds(30);
+
+        service
+            .disable(user_id(), MfaProof::Totp(&valid_code()))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            service.status(user_id()).await.unwrap(),
+            MfaStatus::Disabled
+        );
+        assert_eq!(
+            repository.factor(user_id()).unwrap().factor.status(),
+            MfaFactorStatus::Disabled
         );
     }
 }

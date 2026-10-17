@@ -330,3 +330,361 @@ fn map_security_failure(
     tracing::error!(error = %error, error_debug = ?error, operation, "MFA login security operation failed");
     MfaLoginError::Unavailable
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        convert::Infallible,
+        future,
+        sync::{Arc, Mutex},
+    };
+
+    use chrono::{TimeZone, Utc};
+
+    use crate::{
+        auth::{
+            application::{
+                login_user_repository::LoginUser,
+                mfa::{
+                    ports::{
+                        MfaChallengeRepository, MfaChallengeTokenGenerator,
+                        MfaChallengeTokenHasher, MfaFactorRepository, RecoveryCodeHasher,
+                        StoredTotpFactor, TotpSecretCipher, TotpVerifier,
+                    },
+                    test_support::{FixedClock, MemoryMfaRepository, TestSecurity},
+                },
+            },
+            domain::{
+                mfa::{
+                    AuthenticationMethod, EncryptedTotpSecret, MfaEnrollmentId, RecoveryCodeHash,
+                    TotpFactor,
+                },
+                models::{AuthenticatedUser, JwtClaims, Session, SessionId, UserId},
+            },
+        },
+        shared::user_role::UserRole,
+    };
+
+    use super::*;
+
+    struct Passwords;
+
+    impl PasswordVerifier for Passwords {
+        fn verify(&self, password: &str, stored_hash: &str) -> bool {
+            password == "correct" && stored_hash == "stored-hash"
+        }
+    }
+
+    #[derive(Clone)]
+    struct Users;
+
+    impl LoginUserRepository for Users {
+        type Error = Infallible;
+
+        fn find_by_email(
+            &self,
+            email: &str,
+        ) -> impl Future<Output = Result<Option<LoginUser>, Self::Error>> + Send {
+            future::ready(Ok((email == "neo@example.com").then(login_user)))
+        }
+    }
+
+    impl AuthenticatedUserRepository for Users {
+        type Error = Infallible;
+
+        fn find_by_id(
+            &self,
+            user_id: i32,
+        ) -> impl Future<Output = Result<Option<AuthenticatedUser>, Self::Error>> + Send {
+            future::ready(Ok((user_id == 42).then(authenticated_user)))
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct Sessions(Arc<Mutex<Vec<Session>>>);
+
+    impl SessionRepository for Sessions {
+        type Error = Infallible;
+
+        fn create(
+            &self,
+            session: &Session,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+            self.0.lock().unwrap().push(session.clone());
+            future::ready(Ok(()))
+        }
+
+        fn find_by_id(
+            &self,
+            _session_id: &SessionId,
+        ) -> impl Future<Output = Result<Option<Session>, Self::Error>> + Send {
+            future::ready(Ok(None))
+        }
+
+        fn revoke(
+            &self,
+            _session_id: &SessionId,
+            _revoked_at: DateTime<Utc>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+            future::ready(Ok(()))
+        }
+    }
+
+    struct SessionIds;
+
+    impl SessionIdGenerator for SessionIds {
+        fn generate(&self) -> SessionId {
+            SessionId::new(uuid::Uuid::new_v4().to_string()).unwrap()
+        }
+    }
+
+    struct Issuer;
+
+    impl JwtIssuer for Issuer {
+        type Error = Infallible;
+
+        fn issue(&self, _claims: &JwtClaims) -> Result<String, Self::Error> {
+            Ok("signed.jwt".into())
+        }
+    }
+
+    type Service = MfaLoginService<Passwords, Users, Users, Sessions, SessionIds, Issuer>;
+
+    fn login_user() -> LoginUser {
+        LoginUser {
+            id: user_id(),
+            username: "neo".into(),
+            main_group: UserRole::Admin,
+            permissions: Vec::new(),
+            avatar: None,
+            password_hash: "stored-hash".into(),
+        }
+    }
+
+    fn authenticated_user() -> AuthenticatedUser {
+        login_user().into_authenticated_user()
+    }
+
+    fn user_id() -> UserId {
+        UserId::new(42).unwrap()
+    }
+
+    fn active_factor(now: DateTime<Utc>, recovery_codes: &[&str]) -> StoredTotpFactor {
+        let mut factor = TotpFactor::pending(
+            user_id(),
+            MfaEnrollmentId::new(),
+            EncryptedTotpSecret::new(b"test-secret".to_vec()).unwrap(),
+            1,
+            now,
+        )
+        .unwrap();
+        factor.activate(now).unwrap();
+        StoredTotpFactor {
+            factor,
+            pending_expires_at: None,
+            recovery_code_hashes: recovery_codes
+                .iter()
+                .map(|code| RecoveryCodeHash::new(format!("hash:{code}")).unwrap())
+                .collect(),
+        }
+    }
+
+    fn service(
+        repository: &Arc<MemoryMfaRepository>,
+        sessions: Sessions,
+        clock: &FixedClock,
+        max_attempts: u16,
+    ) -> Service {
+        let security = Arc::new(TestSecurity::default());
+        let factor_verification = Arc::new(MfaFactorVerificationService::new(
+            Arc::clone(repository) as Arc<dyn MfaFactorRepository>,
+            Arc::clone(&security) as Arc<dyn TotpSecretCipher>,
+            Arc::clone(&security) as Arc<dyn TotpVerifier>,
+            Arc::clone(&security) as Arc<dyn RecoveryCodeHasher>,
+            Arc::new(clock.clone()),
+        ));
+        let session_issuer = AuthenticatedSessionIssuer::new(
+            sessions, SessionIds, Issuer, "lara", "lara-api", 3_600,
+        )
+        .unwrap();
+
+        MfaLoginService::new(
+            Passwords,
+            Users,
+            Users,
+            session_issuer,
+            Arc::clone(repository) as Arc<dyn MfaFactorRepository>,
+            Arc::clone(repository) as Arc<dyn MfaChallengeRepository>,
+            Arc::clone(&security) as Arc<dyn MfaChallengeTokenGenerator>,
+            security as Arc<dyn MfaChallengeTokenHasher>,
+            factor_verification,
+            Arc::new(clock.clone()),
+            300,
+            max_attempts,
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn password_only_user_gets_session_without_challenge() {
+        let repository = Arc::new(MemoryMfaRepository::default());
+        let sessions = Sessions::default();
+        let clock = FixedClock::at(Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap());
+        let service = service(&repository, sessions.clone(), &clock, 3);
+
+        let result = service
+            .begin_login("neo@example.com", "correct")
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MfaLoginResult::Authenticated(_)));
+        assert_eq!(sessions.0.lock().unwrap().len(), 1);
+        assert_eq!(
+            sessions.0.lock().unwrap()[0].authentication_method,
+            AuthenticationMethod::Password
+        );
+    }
+
+    #[tokio::test]
+    async fn active_factor_requires_second_step_before_session_is_issued() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let repository = Arc::new(MemoryMfaRepository::default());
+        repository.insert_factor(active_factor(now, &["RECOVERY-00"]));
+        let sessions = Sessions::default();
+        let clock = FixedClock::at(now);
+        let service = service(&repository, sessions.clone(), &clock, 3);
+
+        let result = service
+            .begin_login("neo@example.com", "correct")
+            .await
+            .unwrap();
+
+        assert!(matches!(result, MfaLoginResult::MfaRequired(_)));
+        assert!(sessions.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn totp_completes_challenge_once_and_records_strong_session() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let repository = Arc::new(MemoryMfaRepository::default());
+        repository.insert_factor(active_factor(now, &[]));
+        let sessions = Sessions::default();
+        let clock = FixedClock::at(now);
+        let service = service(&repository, sessions.clone(), &clock, 3);
+        let MfaLoginResult::MfaRequired(challenge) = service
+            .begin_login("neo@example.com", "correct")
+            .await
+            .unwrap()
+        else {
+            panic!("expected MFA challenge");
+        };
+        let proof = MfaLoginProof::Totp(TotpCode::new("123456").unwrap());
+
+        service
+            .complete_login(&challenge.challenge_token, &proof)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            sessions.0.lock().unwrap()[0].authentication_method,
+            AuthenticationMethod::PasswordTotp
+        );
+        assert_eq!(
+            service
+                .complete_login(&challenge.challenge_token, &proof)
+                .await,
+            Err(MfaLoginError::InvalidChallenge)
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_codes_exhaust_challenge_attempts() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let repository = Arc::new(MemoryMfaRepository::default());
+        repository.insert_factor(active_factor(now, &[]));
+        let clock = FixedClock::at(now);
+        let service = service(&repository, Sessions::default(), &clock, 2);
+        let MfaLoginResult::MfaRequired(challenge) = service
+            .begin_login("neo@example.com", "correct")
+            .await
+            .unwrap()
+        else {
+            panic!("expected MFA challenge");
+        };
+        let proof = MfaLoginProof::Totp(TotpCode::new("000000").unwrap());
+
+        assert_eq!(
+            service
+                .complete_login(&challenge.challenge_token, &proof)
+                .await,
+            Err(MfaLoginError::InvalidCode)
+        );
+        assert_eq!(
+            service
+                .complete_login(&challenge.challenge_token, &proof)
+                .await,
+            Err(MfaLoginError::InvalidCode)
+        );
+        assert_eq!(
+            service
+                .complete_login(&challenge.challenge_token, &proof)
+                .await,
+            Err(MfaLoginError::InvalidChallenge)
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_code_is_consumed_and_challenge_expiration_is_enforced() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let repository = Arc::new(MemoryMfaRepository::default());
+        repository.insert_factor(active_factor(now, &["RECOVERY-00"]));
+        let sessions = Sessions::default();
+        let clock = FixedClock::at(now);
+        let service = service(&repository, sessions.clone(), &clock, 3);
+        let MfaLoginResult::MfaRequired(first) = service
+            .begin_login("neo@example.com", "correct")
+            .await
+            .unwrap()
+        else {
+            panic!("expected MFA challenge");
+        };
+        let proof = MfaLoginProof::RecoveryCode(RecoveryCode::new("RECOVERY-00").unwrap());
+        service
+            .complete_login(&first.challenge_token, &proof)
+            .await
+            .unwrap();
+        assert_eq!(
+            sessions.0.lock().unwrap()[0].authentication_method,
+            AuthenticationMethod::PasswordRecoveryCode
+        );
+
+        let MfaLoginResult::MfaRequired(second) = service
+            .begin_login("neo@example.com", "correct")
+            .await
+            .unwrap()
+        else {
+            panic!("expected MFA challenge");
+        };
+        assert_eq!(
+            service
+                .complete_login(&second.challenge_token, &proof)
+                .await,
+            Err(MfaLoginError::InvalidCode)
+        );
+
+        let MfaLoginResult::MfaRequired(expiring) = service
+            .begin_login("neo@example.com", "correct")
+            .await
+            .unwrap()
+        else {
+            panic!("expected MFA challenge");
+        };
+        *clock.0.lock().unwrap() = expiring.expires_at;
+        assert_eq!(
+            service
+                .complete_login(&expiring.challenge_token, &proof)
+                .await,
+            Err(MfaLoginError::InvalidChallenge)
+        );
+    }
+}
