@@ -1,6 +1,8 @@
 mod dto;
 pub mod extractors;
 mod handlers;
+#[allow(dead_code)]
+mod mfa_handlers;
 mod openapi;
 mod routes;
 pub mod state;

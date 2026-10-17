@@ -3,7 +3,11 @@ use utoipa::{Modify, OpenApi};
 
 use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 
-use super::dto::{LoginRequest, LoginResponse, SessionResponse, SessionUserResponse};
+use super::dto::{
+    CompleteMfaLoginRequest, ConfirmTotpEnrollmentRequest, LoginRequest, LoginResponse,
+    MfaChallengeResponse, MfaLoginResponse, MfaProofRequest, MfaStatusResponse,
+    RecoveryCodesResponse, SessionResponse, SessionUserResponse, TotpEnrollmentResponse,
+};
 
 const BEARER_AUTH_SCHEME: &str = "bearerAuth";
 
@@ -12,6 +16,14 @@ const BEARER_AUTH_SCHEME: &str = "bearerAuth";
     components(schemas(
         LoginRequest,
         LoginResponse,
+        CompleteMfaLoginRequest,
+        MfaLoginResponse,
+        MfaChallengeResponse,
+        MfaStatusResponse,
+        TotpEnrollmentResponse,
+        ConfirmTotpEnrollmentRequest,
+        MfaProofRequest,
+        RecoveryCodesResponse,
         SessionResponse,
         SessionUserResponse
     )),
@@ -70,8 +82,15 @@ mod tests {
     use utoipa_axum::router::OpenApiRouter;
 
     use crate::auth::{
-        application::{authenticate_jwt::AuthenticateBearerToken, login::Login},
-        presentation::{extractors::JwtExtractorState, state::LoginState},
+        application::{
+            authenticate_jwt::AuthenticateBearerToken,
+            login::Login,
+            mfa::{login::MfaLogin, management::ManageMfa},
+        },
+        presentation::{
+            extractors::JwtExtractorState,
+            state::{LoginState, MfaState},
+        },
     };
 
     use super::*;
@@ -91,9 +110,19 @@ mod tests {
         }
     }
 
+    impl MfaState for DocumentationState {
+        fn mfa_login_service(&self) -> Arc<dyn MfaLogin> {
+            panic!("documentation generation does not resolve application services")
+        }
+
+        fn mfa_management_service(&self) -> Arc<dyn ManageMfa> {
+            panic!("documentation generation does not resolve application services")
+        }
+    }
+
     fn document() -> utoipa::openapi::OpenApi {
         OpenApiRouter::<DocumentationState>::with_openapi(base_document())
-            .nest("/auth", super::super::routes::router())
+            .nest("/auth", super::super::routes::mfa_router())
             .into_openapi()
     }
 
@@ -104,6 +133,12 @@ mod tests {
         assert_eq!(specification["openapi"], "3.1.0");
         assert!(specification["paths"]["/auth/login"]["post"].is_object());
         assert!(specification["paths"]["/auth/session"]["get"].is_object());
+        assert!(specification["paths"]["/auth/login/mfa"]["post"].is_object());
+        assert!(specification["paths"]["/auth/mfa"]["get"].is_object());
+        assert!(specification["paths"]["/auth/mfa/totp/enrollment"]["post"].is_object());
+        assert!(specification["paths"]["/auth/mfa/totp/activation"]["post"].is_object());
+        assert!(specification["paths"]["/auth/mfa/totp"]["delete"].is_object());
+        assert!(specification["paths"]["/auth/mfa/recovery-codes"]["post"].is_object());
         assert_eq!(
             specification["paths"]["/auth/session"]["get"]["security"][0][BEARER_AUTH_SCHEME],
             serde_json::json!([])

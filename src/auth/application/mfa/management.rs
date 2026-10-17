@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Duration, Utc};
 use thiserror::Error;
@@ -82,6 +82,38 @@ pub struct MfaManagementService {
     enrollment_ttl: Duration,
     totp_period_seconds: u64,
     totp_digits: usize,
+}
+
+pub trait ManageMfa: Send + Sync {
+    fn status<'a>(
+        &'a self,
+        user_id: UserId,
+    ) -> Pin<Box<dyn Future<Output = Result<MfaStatus, MfaManagementError>> + Send + 'a>>;
+
+    fn begin_enrollment<'a>(
+        &'a self,
+        user_id: UserId,
+        account_name: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<TotpEnrollment, MfaManagementError>> + Send + 'a>>;
+
+    fn confirm_enrollment<'a>(
+        &'a self,
+        user_id: UserId,
+        enrollment_id: MfaEnrollmentId,
+        code: &'a TotpCode,
+    ) -> Pin<Box<dyn Future<Output = Result<MfaActivation, MfaManagementError>> + Send + 'a>>;
+
+    fn disable<'a>(
+        &'a self,
+        user_id: UserId,
+        proof: MfaProof<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), MfaManagementError>> + Send + 'a>>;
+
+    fn regenerate_recovery_codes<'a>(
+        &'a self,
+        user_id: UserId,
+        proof: MfaProof<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<RecoveryCode>, MfaManagementError>> + Send + 'a>>;
 }
 
 impl MfaManagementService {
@@ -317,6 +349,60 @@ impl MfaManagementService {
             return Err(MfaManagementError::Conflict);
         }
         Ok(recovery_codes)
+    }
+}
+
+impl ManageMfa for MfaManagementService {
+    fn status<'a>(
+        &'a self,
+        user_id: UserId,
+    ) -> Pin<Box<dyn Future<Output = Result<MfaStatus, MfaManagementError>> + Send + 'a>> {
+        Box::pin(MfaManagementService::status(self, user_id))
+    }
+
+    fn begin_enrollment<'a>(
+        &'a self,
+        user_id: UserId,
+        account_name: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Result<TotpEnrollment, MfaManagementError>> + Send + 'a>> {
+        Box::pin(MfaManagementService::begin_enrollment(
+            self,
+            user_id,
+            account_name,
+        ))
+    }
+
+    fn confirm_enrollment<'a>(
+        &'a self,
+        user_id: UserId,
+        enrollment_id: MfaEnrollmentId,
+        code: &'a TotpCode,
+    ) -> Pin<Box<dyn Future<Output = Result<MfaActivation, MfaManagementError>> + Send + 'a>> {
+        Box::pin(MfaManagementService::confirm_enrollment(
+            self,
+            user_id,
+            enrollment_id,
+            code,
+        ))
+    }
+
+    fn disable<'a>(
+        &'a self,
+        user_id: UserId,
+        proof: MfaProof<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<(), MfaManagementError>> + Send + 'a>> {
+        Box::pin(MfaManagementService::disable(self, user_id, proof))
+    }
+
+    fn regenerate_recovery_codes<'a>(
+        &'a self,
+        user_id: UserId,
+        proof: MfaProof<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<RecoveryCode>, MfaManagementError>> + Send + 'a>>
+    {
+        Box::pin(MfaManagementService::regenerate_recovery_codes(
+            self, user_id, proof,
+        ))
     }
 }
 
