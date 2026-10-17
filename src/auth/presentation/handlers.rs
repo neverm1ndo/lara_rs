@@ -14,6 +14,7 @@ use super::{
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum LoginRejection {
     BadRequest,
     Unauthorized,
@@ -56,6 +57,7 @@ impl From<LoginError> for LoginRejection {
         (status = 503, description = "Authentication dependencies are unavailable")
     )
 )]
+#[allow(dead_code)]
 pub async fn login(
     LoginServiceHandle(login_service): LoginServiceHandle,
     payload: Result<Json<LoginRequest>, JsonRejection>,

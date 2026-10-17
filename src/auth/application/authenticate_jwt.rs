@@ -1,4 +1,4 @@
-use std::{error::Error, future::Future, pin::Pin};
+use std::{error::Error, future::Future, pin::Pin, sync::Arc};
 
 use chrono::{DateTime, Utc};
 use thiserror::Error;
@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::auth::{
     application::session_repository::SessionRepository,
     domain::{
-        models::{AuthenticatedPrincipal, AuthenticatedUser, JwtClaims},
+        models::{AuthenticatedPrincipal, AuthenticatedUser, JwtClaims, Session},
         rules::is_user_in_work_group,
     },
 };
@@ -46,18 +46,55 @@ pub trait AuthenticateBearerToken: Send + Sync {
     >;
 }
 
+pub trait SessionProtectionPolicy: Send + Sync {
+    fn permits<'a>(
+        &'a self,
+        session: &'a Session,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, AuthenticationError>> + Send + 'a>>;
+}
+
+#[cfg(test)]
+struct AllowEverySession;
+
+#[cfg(test)]
+impl SessionProtectionPolicy for AllowEverySession {
+    fn permits<'a>(
+        &'a self,
+        _session: &'a Session,
+    ) -> Pin<Box<dyn Future<Output = Result<bool, AuthenticationError>> + Send + 'a>> {
+        Box::pin(async { Ok(true) })
+    }
+}
+
 pub struct JwtAuthenticationService<V, S, U> {
     verifier: V,
     sessions: S,
     users: U,
+    protection_policy: Arc<dyn SessionProtectionPolicy>,
 }
 
 impl<V, S, U> JwtAuthenticationService<V, S, U> {
+    #[cfg(test)]
     pub fn new(verifier: V, sessions: S, users: U) -> Self {
         Self {
             verifier,
             sessions,
             users,
+            protection_policy: Arc::new(AllowEverySession),
+        }
+    }
+
+    pub fn with_protection_policy(
+        verifier: V,
+        sessions: S,
+        users: U,
+        protection_policy: Arc<dyn SessionProtectionPolicy>,
+    ) -> Self {
+        Self {
+            verifier,
+            sessions,
+            users,
+            protection_policy,
         }
     }
 }
@@ -89,10 +126,25 @@ where
                 .map_err(|_| AuthenticationError::Unavailable)?
                 .ok_or(AuthenticationError::Unauthorized)?;
 
-            if session.id != claims.sid
-                || session.user_id != claims.sub
-                || !session.is_active(Utc::now())
+            let now = Utc::now();
+            if session.id != claims.sid || session.user_id != claims.sub || !session.is_active(now)
             {
+                return Err(AuthenticationError::Unauthorized);
+            }
+
+            if !self.protection_policy.permits(&session).await? {
+                self.sessions
+                    .revoke(&session.id, now)
+                    .await
+                    .map_err(|error| {
+                        tracing::error!(
+                            error = %error,
+                            error_debug = ?error,
+                            session_id = session.id.as_str(),
+                            "failed to revoke a session with insufficient MFA protection"
+                        );
+                        AuthenticationError::Unavailable
+                    })?;
                 return Err(AuthenticationError::Unauthorized);
             }
 
@@ -122,7 +174,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::{future, io};
+    use std::{
+        future, io,
+        sync::{Arc, Mutex},
+    };
 
     use chrono::Duration;
 
@@ -162,6 +217,14 @@ mod tests {
                 Err(error) => Err(io::Error::new(error.kind(), error.to_string())),
             })
         }
+
+        fn revoke(
+            &self,
+            _session_id: &SessionId,
+            _revoked_at: DateTime<Utc>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+            future::ready(Ok(()))
+        }
     }
 
     struct Users(Result<Option<AuthenticatedUser>, io::Error>);
@@ -177,6 +240,49 @@ mod tests {
                 Ok(user) => Ok(user.clone()),
                 Err(error) => Err(io::Error::new(error.kind(), error.to_string())),
             })
+        }
+    }
+
+    struct RejectPasswordSession;
+
+    impl SessionProtectionPolicy for RejectPasswordSession {
+        fn permits<'a>(
+            &'a self,
+            _session: &'a Session,
+        ) -> Pin<Box<dyn Future<Output = Result<bool, AuthenticationError>> + Send + 'a>> {
+            Box::pin(async { Ok(false) })
+        }
+    }
+
+    struct RevokingSessions {
+        session: Session,
+        revoked: Arc<Mutex<Vec<SessionId>>>,
+    }
+
+    impl SessionRepository for RevokingSessions {
+        type Error = io::Error;
+
+        fn create(
+            &self,
+            _session: &Session,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+            future::ready(Ok(()))
+        }
+
+        fn find_by_id(
+            &self,
+            _session_id: &SessionId,
+        ) -> impl Future<Output = Result<Option<Session>, Self::Error>> + Send {
+            future::ready(Ok(Some(self.session.clone())))
+        }
+
+        fn revoke(
+            &self,
+            session_id: &SessionId,
+            _revoked_at: DateTime<Utc>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+            self.revoked.lock().unwrap().push(session_id.clone());
+            future::ready(Ok(()))
         }
     }
 
@@ -210,6 +316,29 @@ mod tests {
             permissions,
             avatar: None,
         }
+    }
+
+    #[tokio::test]
+    async fn revokes_session_rejected_by_current_protection_policy() {
+        let revoked = Arc::new(Mutex::new(Vec::new()));
+        let service = JwtAuthenticationService::with_protection_policy(
+            Verifier(Ok(claims())),
+            RevokingSessions {
+                session: session(),
+                revoked: Arc::clone(&revoked),
+            },
+            Users(Ok(Some(user(UserRole::Admin, vec![])))),
+            Arc::new(RejectPasswordSession),
+        );
+
+        assert_eq!(
+            service.authenticate("token").await,
+            Err(AuthenticationError::Unauthorized)
+        );
+        assert_eq!(
+            revoked.lock().unwrap().as_slice(),
+            &[SessionId::new("session-1").unwrap()]
+        );
     }
 
     fn service(

@@ -7,6 +7,7 @@ use super::{
 };
 
 /// Mount this router under `/auth` in the application's root router.
+#[allow(dead_code)]
 pub fn router<S>() -> OpenApiRouter<S>
 where
     S: JwtExtractorState + LoginState + Clone + Send + Sync + 'static,
@@ -18,7 +19,6 @@ where
 
 /// MFA-aware replacement for `router`, activated by bootstrap once all MFA
 /// adapters have been constructed.
-#[allow(dead_code)]
 pub fn mfa_router<S>() -> OpenApiRouter<S>
 where
     S: JwtExtractorState + MfaState + Clone + Send + Sync + 'static,

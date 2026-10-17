@@ -311,6 +311,14 @@ mod tests {
         ) -> impl Future<Output = Result<Option<Session>, Self::Error>> + Send {
             future::ready(Ok(None))
         }
+
+        fn revoke(
+            &self,
+            _session_id: &SessionId,
+            _revoked_at: DateTime<Utc>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+            future::ready(Ok(()))
+        }
     }
 
     struct SessionIds;

@@ -7,21 +7,20 @@ use crate::auth::application::{
     mfa::{login::MfaLogin, management::ManageMfa},
 };
 
+#[allow(dead_code)]
 pub trait LoginState: Send + Sync {
     fn login_service(&self) -> Arc<dyn Login>;
 }
 
+#[allow(dead_code)]
 pub struct LoginServiceHandle(pub Arc<dyn Login>);
 
-#[allow(dead_code)]
 pub trait MfaState: Send + Sync {
     fn mfa_login_service(&self) -> Arc<dyn MfaLogin>;
     fn mfa_management_service(&self) -> Arc<dyn ManageMfa>;
 }
 
-#[allow(dead_code)]
 pub struct MfaLoginServiceHandle(pub Arc<dyn MfaLogin>);
-#[allow(dead_code)]
 pub struct MfaManagementServiceHandle(pub Arc<dyn ManageMfa>);
 
 impl<S> FromRequestParts<S> for LoginServiceHandle

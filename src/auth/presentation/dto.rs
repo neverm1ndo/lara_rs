@@ -14,7 +14,6 @@ use crate::auth::{
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct CompleteMfaLoginRequest {
     pub challenge_token: String,
     pub totp_code: Option<String>,
@@ -100,7 +99,6 @@ impl From<TotpEnrollment> for TotpEnrollmentResponse {
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct ConfirmTotpEnrollmentRequest {
     pub enrollment_id: String,
     pub code: String,
@@ -108,7 +106,6 @@ pub struct ConfirmTotpEnrollmentRequest {
 
 #[derive(Debug, Deserialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)]
 pub struct MfaProofRequest {
     pub totp_code: Option<String>,
     pub recovery_code: Option<String>,

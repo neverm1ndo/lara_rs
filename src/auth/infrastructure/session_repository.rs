@@ -106,6 +106,20 @@ impl SessionRepository for MongoSessionRepository {
 
         document.map(TryInto::try_into).transpose()
     }
+
+    async fn revoke(
+        &self,
+        session_id: &SessionId,
+        revoked_at: DateTime<Utc>,
+    ) -> Result<(), Self::Error> {
+        self.sessions
+            .update_one(
+                doc! { "_id": session_id.as_str() },
+                doc! { "$set": { "revoked_at": BsonDateTime::from_millis(revoked_at.timestamp_millis()) } },
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 impl From<&Session> for SessionDocument {
