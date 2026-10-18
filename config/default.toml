@@ -24,7 +24,31 @@ allowed_clock_skew_steps = 1
 [mongodb]
 database = "lara"
 
-# Root of the managed SAMP/open.mp installation. Relative paths are resolved
+# Stable ID of the only primary instance. Additional instances are declared in
+# production overlays because their paths and systemd units are host-specific.
+[game_server]
+primary_instance = "main"
+
+[[game_server.instances]]
+id = "main"
+display_name = "Main server"
+kind = "primary"
+environment = "production"
+sort_order = 10
+systemd_unit = "lara-game@main.service"
+capabilities = [
+    "overview",
+    "lifecycle",
+    "configuration",
+    "maps",
+    "backups",
+    "incidents",
+]
+readiness = "uds"
+incident_tracking = true
+systemd_observation = false
+
+# Root of the primary managed SAMP/open.mp installation. Relative paths are resolved
 # from the server process working directory. Production deployments should
 # override this with an absolute path.
 [game_server.storage]

@@ -1,6 +1,6 @@
 [package]
 name = "lara-rs"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["neverm1ndo <it@nmnd.ru>"]
 license = "MIT"
@@ -11,11 +11,28 @@ maintainer = "neverm1ndo <it@nmnd.ru>"
 copyright = "2026 neverm1ndo"
 license-file = ["LICENSE.md", "4"]
 extended-description = """\
-A longer, multi-line description of the application \
-that explains what it does in detail.\
+Lara is the authenticated control plane for open.mp game servers. \
+This package installs the API daemon, systemd units, configuration examples, \
+and the Release A pilot verification utility.\
 """
-# Автоматически определит зависимости по ELF-файлу, но можно добавить явные:
-depends = "$auto, libssl3"
+section = "admin"
+priority = "optional"
+depends = "$auto, adduser, systemd"
+maintainer-scripts = "debian"
+assets = [
+    ["target/release/lara-rs", "usr/bin/", "755"],
+    ["config/default.toml", "usr/share/lara-rs/config/default.toml", "644"],
+    [".env.example", "usr/share/doc/lara-rs/examples/lara.env.example", "644"],
+    ["deploy/systemd/instance.env.example", "usr/share/doc/lara-rs/examples/game-instance.env.example", "644"],
+    ["deploy/systemd/override.conf.example", "usr/share/doc/lara-rs/examples/game-instance.override.conf.example", "644"],
+    ["deploy/systemd/production.toml.example", "usr/share/doc/lara-rs/examples/production.toml.example", "644"],
+    ["deploy/systemd/README.md", "usr/share/doc/lara-rs/systemd-pilot.md", "644"],
+    ["deploy/systemd/verify-pilot.sh", "usr/lib/lara-rs/verify-pilot", "755"],
+]
+systemd-units = [
+    { unit-name = "lara-rs", unit-scripts = "deploy/systemd", enable = false, start = false },
+    { unit-name = "lara-game", unit-scripts = "deploy/systemd", enable = false, start = false },
+]
 
 [dependencies]
 aes-gcm = "0.10.3"
@@ -28,6 +45,7 @@ config = { version = "0.15.27", default-features = false, features = ["toml"] }
 dotenvy = "0.15.7"
 diff-match-patch-rs = "0.5.1"
 encoding_rs = "0.8.42"
+futures-util = "0.3.31"
 glob = "0.3.4"
 hmac = "0.12.1"
 jsonwebtoken = { version = "11.1.0", features = ["rust_crypto"] }
@@ -46,7 +64,7 @@ similar = "3.2.0"
 socketioxide = "0.18.7"
 subtle = "2.6.1"
 thiserror = "2.0.21"
-tokio = { version = "1.53.2", features = ["signal"] }
+tokio = { version = "1.53.2", features = ["signal", "time"] }
 tokio-util = { version = "0.7.20", features = ["io"] }
 tower = "0.5.3"
 tower-http = "0.7.1"
@@ -57,3 +75,4 @@ utoipa = "6.0.0"
 utoipa-axum = "0.3.0"
 uuid = { version = "1.28.0", features = ["v4"] }
 zeroize = "1.9.1"
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }

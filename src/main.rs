@@ -13,6 +13,8 @@ mod configuration;
 // which intentionally remain unused until those adapters are introduced.
 #[allow(dead_code)]
 mod maps;
+#[allow(dead_code)]
+mod server_instances;
 mod shared;
 mod user;
 

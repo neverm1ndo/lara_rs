@@ -61,6 +61,18 @@ use crate::{
         domain::{MAPS_STORAGE_NAMESPACE, MapFilePolicy},
         infrastructure::file_service::LocalMapsFileService,
     },
+    server_instances::{
+        self,
+        application::{
+            registry::InstanceRegistry,
+            runtime_state::{RuntimeStateReader, RuntimeStateWriter},
+        },
+        infrastructure::{
+            config_registry::ConfiguredInstanceRegistry,
+            runtime_state_store::InMemoryRuntimeStateStore,
+            systemd_observer::{SystemdObservationTarget, SystemdObserverWorker},
+        },
+    },
     shared::{
         config::{AppConfig, model::BackupCompression},
         file_storage::{
@@ -90,7 +102,10 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let application = build_application(config).await?;
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let maintenance = tokio::spawn(application.maintenance_worker.run(shutdown_rx));
+    let maintenance = tokio::spawn(application.maintenance_worker.run(shutdown_rx.clone()));
+    let systemd_observer = application
+        .systemd_observer
+        .map(|worker| tokio::spawn(worker.run(shutdown_rx)));
 
     info!(address = %bind_address, "HTTP server listening");
     let server_result = axum::serve(listener, application.router)
@@ -98,6 +113,9 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
         .await;
     let _ = shutdown_tx.send(true);
     maintenance.await?;
+    if let Some(observer) = systemd_observer {
+        observer.await?;
+    }
     server_result?;
     Ok(())
 }
@@ -105,9 +123,32 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
 struct BuiltApplication {
     router: Router,
     maintenance_worker: BackupMaintenanceWorker,
+    systemd_observer: Option<SystemdObserverWorker>,
 }
 
 async fn build_application(config: AppConfig) -> Result<BuiltApplication, BootstrapError> {
+    let instance_registry = ConfiguredInstanceRegistry::from_config(&config.game_server)?;
+    let runtime_states = Arc::new(InMemoryRuntimeStateStore::new());
+    let runtime_state_reader: Arc<dyn RuntimeStateReader> = runtime_states.clone();
+    let runtime_state_writer: Arc<dyn RuntimeStateWriter> = runtime_states;
+    let observation_targets: Vec<_> = instance_registry
+        .observed()
+        .map(|configured| {
+            let descriptor = configured.descriptor();
+            SystemdObservationTarget::new(
+                descriptor.id().clone(),
+                configured.systemd_unit().as_str(),
+                descriptor.observability().readiness(),
+            )
+        })
+        .collect();
+    let systemd_observer = (!observation_targets.is_empty())
+        .then(|| SystemdObserverWorker::new(observation_targets, runtime_state_writer));
+    info!(
+        instance_count = instance_registry.list().len(),
+        primary_instance = %instance_registry.primary().id(),
+        "server instance registry loaded"
+    );
     let configurator_directory =
         RelativeStoragePath::try_from(config.configuration.files.configurator_directory.as_path())?;
     let maps_directory = RelativeStoragePath::try_from(config.maps.files.directory.as_path())?;
@@ -295,6 +336,8 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         mfa_login_service,
         mfa_management_service,
         get_user_service,
+        instance_registry,
+        runtime_state_reader,
         configurator_directory,
         maps_file_service,
         maps_upload_limits,
@@ -304,6 +347,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let openapi = base_openapi_document();
 
     let (router, openapi) = OpenApiRouter::<AppState>::with_openapi(openapi)
+        .merge(server_instances::presentation::router::<AppState>())
         .nest("/auth", auth::presentation::mfa_router::<AppState>())
         .nest("/maps", maps::presentation::router::<AppState>())
         .nest("/backups", backups::presentation::router::<AppState>())
@@ -314,6 +358,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     Ok(BuiltApplication {
         router: router.merge(auth::presentation::openapi_router(openapi)),
         maintenance_worker,
+        systemd_observer,
     })
 }
 
@@ -321,6 +366,7 @@ fn base_openapi_document() -> utoipa::openapi::OpenApi {
     auth::presentation::openapi_document()
         .merge_from(maps::presentation::openapi_document())
         .merge_from(backups::presentation::openapi_document())
+        .merge_from(server_instances::presentation::openapi_document())
         .merge_from(user::presentation::openapi_document())
 }
 
@@ -349,6 +395,10 @@ mod tests {
             application::lifecycle::BackupLifecycleService, presentation::state::BackupsState,
         },
         maps::{application::file_service::MapsFileService, presentation::state::MapsState},
+        server_instances::{
+            application::{registry::InstanceRegistry, runtime_state::RuntimeStateReader},
+            presentation::state::ServerInstancesState,
+        },
         shared::file_storage::upload::MultipartUploadLimits,
         user::{application::get_user::GetUser, presentation::state::UserState},
     };
@@ -394,9 +444,20 @@ mod tests {
         }
     }
 
+    impl ServerInstancesState for DocumentationState {
+        fn instance_registry(&self) -> Arc<dyn InstanceRegistry> {
+            panic!("documentation generation does not resolve application ports")
+        }
+
+        fn runtime_state_reader(&self) -> Arc<dyn RuntimeStateReader> {
+            panic!("documentation generation does not resolve application ports")
+        }
+    }
+
     #[test]
     fn global_openapi_document_contains_domain_routes() {
         let document = OpenApiRouter::<DocumentationState>::with_openapi(base_openapi_document())
+            .merge(crate::server_instances::presentation::router())
             .nest("/auth", auth::presentation::mfa_router())
             .nest("/maps", maps::presentation::router())
             .nest("/backups", backups::presentation::router())
@@ -416,6 +477,8 @@ mod tests {
         assert!(specification["paths"]["/backups/backup/{backup_id}"]["get"].is_object());
         assert!(specification["paths"]["/backups/restore/{backup_id}"]["post"].is_object());
         assert!(specification["paths"]["/user/{id}"]["get"].is_object());
+        assert!(specification["paths"]["/server-instances"]["get"].is_object());
+        assert!(specification["paths"]["/server-instances/{instance_id}/state"]["get"].is_object());
         assert!(specification["components"]["schemas"]["UserResponse"].is_object());
         assert!(specification["components"]["schemas"]["MapFileMutationsResponse"].is_object());
         assert_eq!(

@@ -4,13 +4,13 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use ::config::{ConfigBuilder, Environment, File, Map, builder::DefaultState};
+use ::config::{ConfigBuilder, Environment, File, FileFormat, Map, builder::DefaultState};
 
 use super::{AppConfig, ConfigError};
 use crate::shared::config::model::BackupCompression;
 use crate::shared::file_storage::path::{RelativeStoragePath, StorageFileName};
 
-const DEFAULT_CONFIG_FILE: &str = "config/default.toml";
+const EMBEDDED_DEFAULT_CONFIG: &str = include_str!("../../../config/default.toml");
 const CONFIG_FILE_ENV: &str = "LARA_CONFIG_FILE";
 const DEFAULT_BIND_ADDRESS: &str = "127.0.0.1:3000";
 const DEFAULT_JWT_TTL_SECONDS: i64 = 3_600;
@@ -58,7 +58,7 @@ const MAX_BACKUP_DIFF_TIMEOUT_MS: u64 = 60_000;
 
 impl AppConfig {
     /// Loads configuration in ascending priority order:
-    /// built-in defaults, optional default TOML, an explicitly selected TOML,
+    /// built-in scalars, embedded default TOML, an explicitly selected TOML,
     /// deprecated environment names, and finally `LARA_*` variables.
     pub fn load() -> Result<Self, ConfigError> {
         let mut builder = ::config::Config::builder()
@@ -107,7 +107,10 @@ impl AppConfig {
                 "backups.diff.generation_timeout_ms",
                 DEFAULT_BACKUP_DIFF_GENERATION_TIMEOUT_MS,
             )?
-            .add_source(File::from(Path::new(DEFAULT_CONFIG_FILE)).required(false));
+            // Keep the production binary independent from its current working
+            // directory. The committed, non-secret defaults are compiled into
+            // the executable; deployment files only override them.
+            .add_source(File::from_str(EMBEDDED_DEFAULT_CONFIG, FileFormat::Toml));
 
         if let Some(path) = nonempty_env(CONFIG_FILE_ENV) {
             tracing::info!(config_file = %path, "loading configuration overlay");
@@ -649,8 +652,6 @@ fn validate_mfa_encryption_key(value: &str) -> Result<(), ConfigError> {
 
 #[cfg(test)]
 mod tests {
-    use ::config::FileFormat;
-
     use super::*;
 
     type ConfigMutation = Box<dyn Fn(&mut AppConfig)>;
@@ -684,6 +685,8 @@ mod tests {
                 database: "lara".into(),
             },
             game_server: super::super::model::GameServerConfig {
+                primary_instance: "main".into(),
+                instances: vec![],
                 storage: super::super::model::FileStorageConfig {
                     root: "D:/servers/openmp".into(),
                     max_tree_depth: 32,
@@ -1511,6 +1514,41 @@ mod tests {
         assert_eq!(
             config.jwt.secret.expose_secret(),
             "environment-secret-with-32-bytes!"
+        );
+    }
+
+    #[test]
+    fn packaged_production_overlay_merges_with_embedded_defaults() {
+        let overlay = include_str!("../../../deploy/systemd/production.toml.example");
+        let secrets = Map::from([
+            (
+                "LARA_JWT__SECRET".into(),
+                "environment-secret-with-32-bytes!".into(),
+            ),
+            ("LARA_MFA__ENCRYPTION_KEY".into(), "11".repeat(32)),
+            ("LARA_MYSQL__URL".into(), "mysql://localhost/lara".into()),
+            (
+                "LARA_MONGODB__URI".into(),
+                "mongodb://localhost:27017".into(),
+            ),
+        ]);
+
+        let config = ::config::Config::builder()
+            .add_source(File::from_str(EMBEDDED_DEFAULT_CONFIG, FileFormat::Toml))
+            .add_source(File::from_str(overlay, FileFormat::Toml))
+            .add_source(lara_environment(Some(secrets)))
+            .build()
+            .unwrap()
+            .try_deserialize::<AppConfig>()
+            .unwrap();
+
+        config.validate().unwrap();
+        assert_eq!(config.game_server.instances.len(), 2);
+        assert_eq!(config.game_server.instances[1].id, "dev-dm");
+        assert!(config.game_server.instances[1].systemd_observation);
+        assert_eq!(
+            config.backups.storage.directory,
+            std::path::PathBuf::from("/var/lib/lara/backups")
         );
     }
 }

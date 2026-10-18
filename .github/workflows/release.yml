@@ -14,33 +14,115 @@ jobs:
     permissions:
       contents: write
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+    env:
+      CARGO_TERM_COLOR: always
 
+    steps:
       - name: Install system dependencies
         run: |
           apt-get update
-          apt-get install -y curl build-essential pkg-config libssl-dev git
+          apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            curl \
+            git \
+            jq \
+            libssl-dev \
+            lintian \
+            pkg-config
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+            -y \
+            --profile minimal \
+            --default-toolchain 1.94.1 \
+            --component clippy \
+            --component rustfmt
           echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2
 
+      - name: Verify tag matches Cargo version
+        shell: bash
+        run: |
+          set -euo pipefail
+          package_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "lara-rs") | .version')"
+          test -n "$package_version"
+          if [ "$GITHUB_REF_NAME" != "v$package_version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match Cargo version $package_version" >&2
+            exit 1
+          fi
+
       - name: Install cargo-deb
-        run: cargo install cargo-deb
+        run: cargo install cargo-deb --version 3.8.0 --locked
+
+      - name: Run release checks
+        run: |
+          cargo fmt --all --check
+          cargo clippy --locked --all-targets --all-features -- -D warnings
+          cargo test --locked --all-targets --all-features
+
+      - name: Build release binary
+        run: cargo build --release --locked
 
       - name: Build .deb package
-        run: cargo deb
+        run: |
+          rm -rf target/debian
+          cargo deb --no-build
+
+      - name: Inspect and install .deb package
+        shell: bash
+        run: |
+          set -euo pipefail
+          package="$(find target/debian -maxdepth 1 -type f -name '*.deb' -print -quit)"
+          test -n "$package"
+          cargo_version="$(cargo metadata --locked --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "lara-rs") | .version')"
+          test "$(dpkg-deb --field "$package" Version)" = "$cargo_version-1"
+          test "$(dpkg-deb --field "$package" Architecture)" = "amd64"
+
+          dpkg-deb --info "$package"
+          dpkg-deb --contents "$package"
+          dpkg-deb --fsys-tarfile "$package" \
+            | tar -tf - \
+            | sed 's#^\./##' > /tmp/lara-package-files
+
+          grep -Fx 'usr/bin/lara-rs' /tmp/lara-package-files
+          grep -Fx 'usr/share/lara-rs/config/default.toml' /tmp/lara-package-files
+          grep -Fx 'usr/lib/lara-rs/verify-pilot' /tmp/lara-package-files
+          grep -Fx 'usr/share/doc/lara-rs/examples/production.toml.example' /tmp/lara-package-files
+          grep -Eq '^(usr/)?lib/systemd/system/lara-rs\.service$' /tmp/lara-package-files
+          grep -Eq '^(usr/)?lib/systemd/system/lara-game@\.service$' /tmp/lara-package-files
+
+          lintian --fail-on error "$package"
+          apt-get install -y "./$package"
+          test -x /usr/bin/lara-rs
+          test -x /usr/lib/lara-rs/verify-pilot
+          getent passwd lara
+          getent passwd lara-game
+          test "$(stat -c '%U:%G:%a' /etc/lara)" = "root:lara:750"
+          test "$(stat -c '%U:%G:%a' /var/lib/lara)" = "lara:lara:750"
+          systemd-analyze verify /lib/systemd/system/lara-rs.service
+
+          install -d -o lara-game -g lara-game -m 0770 /srv/openmp/package-check
+          install -o lara-game -g lara-game -m 0750 /bin/true /srv/openmp/package-check/omp-server
+          systemd-analyze verify lara-game@package-check.service
+
+          package_dir="$(dirname "$package")"
+          package_name="$(basename "$package")"
+          (cd "$package_dir" && sha256sum "$package_name" > "$package_name.sha256")
 
       - name: Upload .deb to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
-          files: target/debian/*.deb
+          fail_on_unmatched_files: true
+          files: |
+            target/debian/*.deb
+            target/debian/*.deb.sha256
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
