@@ -26,7 +26,9 @@ RestartSec=5s
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=lara-game-%i
-UMask=0027
+# Lara is a supplementary member of lara-game and needs group write access for
+# instances that expose the configuration capability.
+UMask=0007
 LimitNOFILE=65536
 
 # Baseline hardening. The instance can write only to its own server root.

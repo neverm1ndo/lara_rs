@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+if ! getent group lara-game >/dev/null; then
+    addgroup --system lara-game
+fi
+
+if ! getent group lara >/dev/null; then
+    addgroup --system lara
+fi
+
+if ! getent passwd lara-game >/dev/null; then
+    adduser --system --ingroup lara-game --home /nonexistent \
+        --no-create-home --shell /usr/sbin/nologin lara-game
+fi
+
+if ! getent passwd lara >/dev/null; then
+    adduser --system --ingroup lara --home /var/lib/lara \
+        --no-create-home --shell /usr/sbin/nologin lara
+fi
+
+install -d -o root -g lara -m 0750 /etc/lara
+install -d -o root -g lara-game -m 0750 /etc/lara/game-instances
+install -d -o lara -g lara -m 0750 /var/lib/lara
+install -d -o lara -g lara -m 0750 /var/lib/lara/backups
+
+#DEBHELPER#
+
+exit 0

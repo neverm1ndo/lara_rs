@@ -7,5 +7,8 @@
 WorkingDirectory=/absolute/path/to/instance
 ExecStart=
 ExecStart=/absolute/path/to/instance/omp-server
+# The template hides /home. Disable that isolation only for a verified legacy
+# path under /home; keep ProtectHome=yes for /srv/openmp installations.
+ProtectHome=no
 ReadWritePaths=
 ReadWritePaths=/absolute/path/to/instance
