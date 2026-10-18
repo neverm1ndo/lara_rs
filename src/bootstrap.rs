@@ -62,7 +62,7 @@ use crate::{
         infrastructure::file_service::LocalMapsFileService,
     },
     server_instances::{
-        application::registry::InstanceRegistry,
+        self, application::registry::InstanceRegistry,
         infrastructure::config_registry::ConfiguredInstanceRegistry,
     },
     shared::{
@@ -315,6 +315,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let openapi = base_openapi_document();
 
     let (router, openapi) = OpenApiRouter::<AppState>::with_openapi(openapi)
+        .merge(server_instances::presentation::router::<AppState>())
         .nest("/auth", auth::presentation::mfa_router::<AppState>())
         .nest("/maps", maps::presentation::router::<AppState>())
         .nest("/backups", backups::presentation::router::<AppState>())
@@ -332,6 +333,7 @@ fn base_openapi_document() -> utoipa::openapi::OpenApi {
     auth::presentation::openapi_document()
         .merge_from(maps::presentation::openapi_document())
         .merge_from(backups::presentation::openapi_document())
+        .merge_from(server_instances::presentation::openapi_document())
         .merge_from(user::presentation::openapi_document())
 }
 
@@ -360,6 +362,9 @@ mod tests {
             application::lifecycle::BackupLifecycleService, presentation::state::BackupsState,
         },
         maps::{application::file_service::MapsFileService, presentation::state::MapsState},
+        server_instances::{
+            application::registry::InstanceRegistry, presentation::state::ServerInstancesState,
+        },
         shared::file_storage::upload::MultipartUploadLimits,
         user::{application::get_user::GetUser, presentation::state::UserState},
     };
@@ -405,9 +410,16 @@ mod tests {
         }
     }
 
+    impl ServerInstancesState for DocumentationState {
+        fn instance_registry(&self) -> Arc<dyn InstanceRegistry> {
+            panic!("documentation generation does not resolve application ports")
+        }
+    }
+
     #[test]
     fn global_openapi_document_contains_domain_routes() {
         let document = OpenApiRouter::<DocumentationState>::with_openapi(base_openapi_document())
+            .merge(crate::server_instances::presentation::router())
             .nest("/auth", auth::presentation::mfa_router())
             .nest("/maps", maps::presentation::router())
             .nest("/backups", backups::presentation::router())
@@ -427,6 +439,7 @@ mod tests {
         assert!(specification["paths"]["/backups/backup/{backup_id}"]["get"].is_object());
         assert!(specification["paths"]["/backups/restore/{backup_id}"]["post"].is_object());
         assert!(specification["paths"]["/user/{id}"]["get"].is_object());
+        assert!(specification["paths"]["/server-instances"]["get"].is_object());
         assert!(specification["components"]["schemas"]["UserResponse"].is_object());
         assert!(specification["components"]["schemas"]["MapFileMutationsResponse"].is_object());
         assert_eq!(

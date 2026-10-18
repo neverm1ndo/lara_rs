@@ -12,6 +12,7 @@ use crate::{
     configuration::presentation::authorization::ConfigurationAuthorizationState,
     maps::{application::file_service::MapsFileService, presentation::state::MapsState},
     server_instances::application::registry::InstanceRegistry,
+    server_instances::presentation::state::ServerInstancesState,
     shared::file_storage::{path::RelativeStoragePath, upload::MultipartUploadLimits},
     user::{application::get_user::GetUser, presentation::state::UserState},
 };
@@ -54,9 +55,10 @@ impl AppState {
             backup_lifecycle_service,
         }
     }
+}
 
-    #[allow(dead_code)]
-    pub fn instance_registry(&self) -> Arc<dyn InstanceRegistry> {
+impl ServerInstancesState for AppState {
+    fn instance_registry(&self) -> Arc<dyn InstanceRegistry> {
         Arc::clone(&self.instance_registry)
     }
 }
