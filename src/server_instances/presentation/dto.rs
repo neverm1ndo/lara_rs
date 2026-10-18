@@ -7,7 +7,11 @@ use crate::server_instances::{
     application::manifest::{
         FeatureAccess, FeaturePermission, InstanceManifest, ManifestInstance, ManifestObservability,
     },
-    domain::{InstanceEnvironment, InstanceKind, InstanceReadiness},
+    application::runtime_state::RuntimeStateView,
+    domain::{
+        InstanceEnvironment, InstanceKind, InstanceReadiness, ObservationStatus, ProcessState,
+        ReadinessStatus, TerminationEvidence, TerminationKind,
+    },
 };
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -75,6 +79,92 @@ pub enum InstanceEnvironmentResponse {
 pub enum InstanceReadinessResponse {
     Process,
     Uds,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeStateResponse {
+    pub schema_version: u16,
+    pub instance_id: String,
+    pub process: ProcessStateResponse,
+    pub readiness: RuntimeReadinessResponse,
+    pub observation: RuntimeObservationResponse,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessStateResponse {
+    pub state: ProcessStatusResponse,
+    pub main_pid: Option<u32>,
+    pub restart_count: Option<u32>,
+    pub invocation_id: Option<String>,
+    pub last_termination: Option<TerminationEvidenceResponse>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessStatusResponse {
+    Unknown,
+    Inactive,
+    Activating,
+    Active,
+    Deactivating,
+    Failed,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeReadinessResponse {
+    pub mode: InstanceReadinessResponse,
+    pub status: ReadinessStatusResponse,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ReadinessStatusResponse {
+    Unknown,
+    NotReady,
+    Ready,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeObservationResponse {
+    pub status: ObservationStatusResponse,
+    /// RFC 3339 UTC timestamp. Absent until the first observer snapshot.
+    pub observed_at: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ObservationStatusResponse {
+    NotObserved,
+    Observed,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TerminationEvidenceResponse {
+    pub kind: TerminationKindResponse,
+    pub status: Option<i32>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminationKindResponse {
+    Clean,
+    ExitCode,
+    Signal,
+    CoreDump,
+    Timeout,
+    Watchdog,
+    ResourceFailure,
+    StartLimit,
+    Unknown,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ServerInstanceErrorResponse {
+    pub code: &'static str,
 }
 
 impl From<InstanceManifest> for InstanceManifestResponse {
@@ -165,6 +255,88 @@ impl From<InstanceReadiness> for InstanceReadinessResponse {
         match readiness {
             InstanceReadiness::Process => Self::Process,
             InstanceReadiness::Uds => Self::Uds,
+        }
+    }
+}
+
+impl From<RuntimeStateView> for RuntimeStateResponse {
+    fn from(view: RuntimeStateView) -> Self {
+        let state = view.state;
+        Self {
+            schema_version: 1,
+            instance_id: state.instance_id().to_string(),
+            process: ProcessStateResponse {
+                state: state.process().into(),
+                main_pid: state.main_pid(),
+                restart_count: state.restart_count(),
+                invocation_id: state.invocation_id().map(str::to_owned),
+                last_termination: state.last_termination().map(Into::into),
+            },
+            readiness: RuntimeReadinessResponse {
+                mode: view.readiness_mode.into(),
+                status: state.readiness().into(),
+            },
+            observation: RuntimeObservationResponse {
+                status: state.observation().into(),
+                observed_at: state.observed_at().map(|value| value.to_rfc3339()),
+            },
+        }
+    }
+}
+
+impl From<ProcessState> for ProcessStatusResponse {
+    fn from(state: ProcessState) -> Self {
+        match state {
+            ProcessState::Unknown => Self::Unknown,
+            ProcessState::Inactive => Self::Inactive,
+            ProcessState::Activating => Self::Activating,
+            ProcessState::Active => Self::Active,
+            ProcessState::Deactivating => Self::Deactivating,
+            ProcessState::Failed => Self::Failed,
+        }
+    }
+}
+
+impl From<ReadinessStatus> for ReadinessStatusResponse {
+    fn from(status: ReadinessStatus) -> Self {
+        match status {
+            ReadinessStatus::Unknown => Self::Unknown,
+            ReadinessStatus::NotReady => Self::NotReady,
+            ReadinessStatus::Ready => Self::Ready,
+        }
+    }
+}
+
+impl From<ObservationStatus> for ObservationStatusResponse {
+    fn from(status: ObservationStatus) -> Self {
+        match status {
+            ObservationStatus::NotObserved => Self::NotObserved,
+            ObservationStatus::Observed => Self::Observed,
+        }
+    }
+}
+
+impl From<&TerminationEvidence> for TerminationEvidenceResponse {
+    fn from(evidence: &TerminationEvidence) -> Self {
+        Self {
+            kind: evidence.kind().into(),
+            status: evidence.status(),
+        }
+    }
+}
+
+impl From<TerminationKind> for TerminationKindResponse {
+    fn from(kind: TerminationKind) -> Self {
+        match kind {
+            TerminationKind::Clean => Self::Clean,
+            TerminationKind::ExitCode => Self::ExitCode,
+            TerminationKind::Signal => Self::Signal,
+            TerminationKind::CoreDump => Self::CoreDump,
+            TerminationKind::Timeout => Self::Timeout,
+            TerminationKind::Watchdog => Self::Watchdog,
+            TerminationKind::ResourceFailure => Self::ResourceFailure,
+            TerminationKind::StartLimit => Self::StartLimit,
+            TerminationKind::Unknown => Self::Unknown,
         }
     }
 }

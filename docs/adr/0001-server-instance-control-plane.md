@@ -131,6 +131,13 @@ Auxiliary без application-level probe первоначально считае
 перехода unit в `active`. Позднее ему может быть назначен отдельный readiness
 adapter без изменения доменной модели.
 
+Read-only state API возвращает нормализованные process и readiness состояния
+раздельно. До первого успешного snapshot наблюдателя состояние имеет значение
+`not_observed` с `process: unknown` и не интерпретируется как `offline` или
+инцидент. Developer-проекция также может содержать безопасные operational
+evidence: main PID, restart counter, invocation ID и нормализованную причину
+последнего завершения. Имена systemd units в HTTP-контракт не попадают.
+
 Journald используется для восстановления событий, произошедших во время
 остановки Lara. Для production требуется persistent journal. Периодический
 reconciliation страхует потерю live D-Bus-событий, но не является основным

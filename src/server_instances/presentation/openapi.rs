@@ -4,7 +4,10 @@ use utoipa::{Modify, OpenApi};
 use super::dto::{
     FeatureAccessResponse, FeaturePermissionResponse, InstanceEnvironmentResponse,
     InstanceKindResponse, InstanceManifestResponse, InstanceReadinessResponse,
-    ManifestInstanceResponse, ManifestObservabilityResponse,
+    ManifestInstanceResponse, ManifestObservabilityResponse, ObservationStatusResponse,
+    ProcessStateResponse, ProcessStatusResponse, ReadinessStatusResponse,
+    RuntimeObservationResponse, RuntimeReadinessResponse, RuntimeStateResponse,
+    ServerInstanceErrorResponse, TerminationEvidenceResponse, TerminationKindResponse,
 };
 
 const BEARER_AUTH_SCHEME: &str = "bearerAuth";
@@ -19,7 +22,17 @@ const BEARER_AUTH_SCHEME: &str = "bearerAuth";
         ManifestObservabilityResponse,
         InstanceKindResponse,
         InstanceEnvironmentResponse,
-        InstanceReadinessResponse
+        InstanceReadinessResponse,
+        RuntimeStateResponse,
+        ProcessStateResponse,
+        ProcessStatusResponse,
+        RuntimeReadinessResponse,
+        ReadinessStatusResponse,
+        RuntimeObservationResponse,
+        ObservationStatusResponse,
+        TerminationEvidenceResponse,
+        TerminationKindResponse,
+        ServerInstanceErrorResponse
     )),
     modifiers(&BearerSecurity),
     tags((
@@ -64,7 +77,8 @@ mod tests {
             presentation::extractors::JwtExtractorState,
         },
         server_instances::{
-            application::registry::InstanceRegistry, presentation::state::ServerInstancesState,
+            application::{registry::InstanceRegistry, runtime_state::RuntimeStateReader},
+            presentation::state::ServerInstancesState,
         },
     };
 
@@ -79,6 +93,10 @@ mod tests {
 
     impl ServerInstancesState for DocumentationState {
         fn instance_registry(&self) -> Arc<dyn InstanceRegistry> {
+            panic!("documentation generation does not resolve application ports")
+        }
+
+        fn runtime_state_reader(&self) -> Arc<dyn RuntimeStateReader> {
             panic!("documentation generation does not resolve application ports")
         }
     }
@@ -97,5 +115,7 @@ mod tests {
             serde_json::json!([])
         );
         assert!(specification["components"]["schemas"]["InstanceManifestResponse"].is_object());
+        assert!(specification["paths"]["/server-instances/{instance_id}/state"]["get"].is_object());
+        assert!(specification["components"]["schemas"]["RuntimeStateResponse"].is_object());
     }
 }

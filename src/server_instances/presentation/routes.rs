@@ -8,5 +8,7 @@ pub fn router<S>() -> OpenApiRouter<S>
 where
     S: ServerInstancesState + Clone + Send + Sync + 'static,
 {
-    OpenApiRouter::new().routes(routes!(handlers::get_manifest))
+    OpenApiRouter::new()
+        .routes(routes!(handlers::get_manifest))
+        .routes(routes!(handlers::get_runtime_state))
 }

@@ -62,8 +62,12 @@ use crate::{
         infrastructure::file_service::LocalMapsFileService,
     },
     server_instances::{
-        self, application::registry::InstanceRegistry,
-        infrastructure::config_registry::ConfiguredInstanceRegistry,
+        self,
+        application::{registry::InstanceRegistry, runtime_state::RuntimeStateReader},
+        infrastructure::{
+            config_registry::ConfiguredInstanceRegistry,
+            runtime_state_store::InMemoryRuntimeStateStore,
+        },
     },
     shared::{
         config::{AppConfig, model::BackupCompression},
@@ -113,6 +117,8 @@ struct BuiltApplication {
 
 async fn build_application(config: AppConfig) -> Result<BuiltApplication, BootstrapError> {
     let instance_registry = ConfiguredInstanceRegistry::from_config(&config.game_server)?;
+    let runtime_state_reader: Arc<dyn RuntimeStateReader> =
+        Arc::new(InMemoryRuntimeStateStore::new());
     info!(
         instance_count = instance_registry.list().len(),
         primary_instance = %instance_registry.primary().id(),
@@ -306,6 +312,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         mfa_management_service,
         get_user_service,
         instance_registry,
+        runtime_state_reader,
         configurator_directory,
         maps_file_service,
         maps_upload_limits,
@@ -363,7 +370,8 @@ mod tests {
         },
         maps::{application::file_service::MapsFileService, presentation::state::MapsState},
         server_instances::{
-            application::registry::InstanceRegistry, presentation::state::ServerInstancesState,
+            application::{registry::InstanceRegistry, runtime_state::RuntimeStateReader},
+            presentation::state::ServerInstancesState,
         },
         shared::file_storage::upload::MultipartUploadLimits,
         user::{application::get_user::GetUser, presentation::state::UserState},
@@ -414,6 +422,10 @@ mod tests {
         fn instance_registry(&self) -> Arc<dyn InstanceRegistry> {
             panic!("documentation generation does not resolve application ports")
         }
+
+        fn runtime_state_reader(&self) -> Arc<dyn RuntimeStateReader> {
+            panic!("documentation generation does not resolve application ports")
+        }
     }
 
     #[test]
@@ -440,6 +452,7 @@ mod tests {
         assert!(specification["paths"]["/backups/restore/{backup_id}"]["post"].is_object());
         assert!(specification["paths"]["/user/{id}"]["get"].is_object());
         assert!(specification["paths"]["/server-instances"]["get"].is_object());
+        assert!(specification["paths"]["/server-instances/{instance_id}/state"]["get"].is_object());
         assert!(specification["components"]["schemas"]["UserResponse"].is_object());
         assert!(specification["components"]["schemas"]["MapFileMutationsResponse"].is_object());
         assert_eq!(
