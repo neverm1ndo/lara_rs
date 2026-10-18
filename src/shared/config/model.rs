@@ -104,6 +104,9 @@ pub struct ServerInstanceConfig {
     pub readiness: Option<InstanceReadinessConfig>,
     #[serde(default = "default_incident_tracking")]
     pub incident_tracking: bool,
+    /// Enables the Release A read-only systemd observer for this instance.
+    #[serde(default)]
+    pub systemd_observation: bool,
 }
 
 const fn default_incident_tracking() -> bool {

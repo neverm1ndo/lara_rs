@@ -111,6 +111,7 @@ capabilities = [
 ]
 readiness = "uds"
 incident_tracking = true
+systemd_observation = false
 
 [[game_server.instances]]
 id = "dev-dm"
@@ -123,6 +124,7 @@ storage_root = "/srv/openmp/dev-dm"
 capabilities = ["overview", "lifecycle", "configuration", "incidents"]
 readiness = "process"
 incident_tracking = true
+systemd_observation = true
 ```
 
 После изменения overlay перезапустите Lara и проверьте Developer manifest.

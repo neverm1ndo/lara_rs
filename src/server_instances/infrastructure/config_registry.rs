@@ -46,6 +46,7 @@ pub struct ConfiguredServerInstance {
     descriptor: ServerInstance,
     systemd_unit: SystemdUnitName,
     storage_root: PathBuf,
+    systemd_observation: bool,
 }
 
 impl ConfiguredServerInstance {
@@ -59,6 +60,10 @@ impl ConfiguredServerInstance {
 
     pub fn storage_root(&self) -> &Path {
         &self.storage_root
+    }
+
+    pub const fn systemd_observation(&self) -> bool {
+        self.systemd_observation
     }
 }
 
@@ -118,6 +123,21 @@ impl ConfiguredInstanceRegistry {
         if primary_count != 1 {
             return Err(InstanceRegistryError::PrimaryCount(primary_count));
         }
+        let observed: Vec<_> = instances
+            .values()
+            .filter(|instance| instance.systemd_observation)
+            .collect();
+        if observed.len() > 1 {
+            return Err(InstanceRegistryError::TooManyObservedInstances(
+                observed.len(),
+            ));
+        }
+        if observed
+            .first()
+            .is_some_and(|instance| instance.descriptor.kind() == InstanceKind::Primary)
+        {
+            return Err(InstanceRegistryError::PrimaryObservationNotAllowed);
+        }
 
         Ok(Self {
             primary_id,
@@ -127,6 +147,12 @@ impl ConfiguredInstanceRegistry {
 
     pub fn configured(&self, id: &ServerInstanceId) -> Option<&ConfiguredServerInstance> {
         self.instances.get(id)
+    }
+
+    pub fn observed(&self) -> impl Iterator<Item = &ConfiguredServerInstance> {
+        self.instances
+            .values()
+            .filter(|instance| instance.systemd_observation)
     }
 }
 
@@ -175,6 +201,7 @@ fn legacy_primary(config: &GameServerConfig) -> ServerInstanceConfig {
         ],
         readiness: Some(InstanceReadinessConfig::Uds),
         incident_tracking: true,
+        systemd_observation: false,
     }
 }
 
@@ -241,6 +268,7 @@ fn configured_instance(
         descriptor,
         systemd_unit: SystemdUnitName::new(registration.systemd_unit)?,
         storage_root,
+        systemd_observation: registration.systemd_observation,
     })
 }
 
@@ -301,6 +329,10 @@ pub enum InstanceRegistryError {
     PrimaryKind(ServerInstanceId),
     #[error("server instance registry must contain exactly one primary; found {0}")]
     PrimaryCount(usize),
+    #[error("Release A permits at most one systemd-observed pilot; found {0}")]
+    TooManyObservedInstances(usize),
+    #[error("Release A does not permit automatic systemd observation of the primary instance")]
+    PrimaryObservationNotAllowed,
     #[error("auxiliary server instance `{0}` requires a storage root")]
     MissingStorageRoot(ServerInstanceId),
     #[error("server instance `{0}` has an empty storage root")]
@@ -351,6 +383,7 @@ mod tests {
             ],
             readiness: Some(InstanceReadinessConfig::Uds),
             incident_tracking: true,
+            systemd_observation: false,
         }
     }
 
@@ -371,6 +404,7 @@ mod tests {
             ],
             readiness: Some(InstanceReadinessConfig::Process),
             incident_tracking: true,
+            systemd_observation: false,
         }
     }
 
@@ -470,5 +504,37 @@ mod tests {
             .map(|instance| instance.id().as_str().to_owned())
             .collect();
         assert_eq!(ids, ["earlier", "main", "later"]);
+    }
+
+    #[test]
+    fn release_a_allows_exactly_one_observed_auxiliary() {
+        let mut pilot = auxiliary("dev-dm", "/srv/openmp/dev-dm");
+        pilot.systemd_observation = true;
+        let registry =
+            ConfiguredInstanceRegistry::from_config(&config(vec![primary(), pilot])).unwrap();
+
+        let observed: Vec<_> = registry.observed().collect();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].descriptor().id().as_str(), "dev-dm");
+
+        let mut first = auxiliary("first", "/srv/openmp/first");
+        first.systemd_observation = true;
+        let mut second = auxiliary("second", "/srv/openmp/second");
+        second.systemd_observation = true;
+        assert!(matches!(
+            ConfiguredInstanceRegistry::from_config(&config(vec![primary(), first, second])),
+            Err(InstanceRegistryError::TooManyObservedInstances(2))
+        ));
+    }
+
+    #[test]
+    fn release_a_refuses_primary_systemd_observation() {
+        let mut primary = primary();
+        primary.systemd_observation = true;
+
+        assert!(matches!(
+            ConfiguredInstanceRegistry::from_config(&config(vec![primary])),
+            Err(InstanceRegistryError::PrimaryObservationNotAllowed)
+        ));
     }
 }

@@ -140,6 +140,7 @@ pub struct RuntimeObservationResponse {
 pub enum ObservationStatusResponse {
     NotObserved,
     Observed,
+    Stale,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -312,6 +313,7 @@ impl From<ObservationStatus> for ObservationStatusResponse {
         match status {
             ObservationStatus::NotObserved => Self::NotObserved,
             ObservationStatus::Observed => Self::Observed,
+            ObservationStatus::Stale => Self::Stale,
         }
     }
 }

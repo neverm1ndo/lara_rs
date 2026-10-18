@@ -23,6 +23,7 @@ pub enum ReadinessStatus {
 pub enum ObservationStatus {
     NotObserved,
     Observed,
+    Stale,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -110,6 +111,15 @@ impl InstanceRuntimeState {
         }
     }
 
+    /// Preserves the last evidence while making it explicit that the observer
+    /// can no longer confirm it against systemd.
+    pub fn into_stale(mut self) -> Self {
+        if self.observation == ObservationStatus::Observed {
+            self.observation = ObservationStatus::Stale;
+        }
+        self
+    }
+
     pub fn instance_id(&self) -> &ServerInstanceId {
         &self.instance_id
     }
@@ -184,5 +194,25 @@ mod tests {
             state.last_termination().unwrap().kind(),
             TerminationKind::ExitCode
         );
+    }
+
+    #[test]
+    fn stale_state_preserves_the_last_observation_without_claiming_freshness() {
+        let observed_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let state = InstanceRuntimeState::observed(
+            ServerInstanceId::new("main").unwrap(),
+            ProcessState::Active,
+            ReadinessStatus::Ready,
+            observed_at,
+            Some(42),
+            2,
+            Some("invocation-1".into()),
+            None,
+        )
+        .into_stale();
+
+        assert_eq!(state.observation(), ObservationStatus::Stale);
+        assert_eq!(state.observed_at(), Some(observed_at));
+        assert_eq!(state.main_pid(), Some(42));
     }
 }

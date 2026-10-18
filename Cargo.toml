@@ -28,6 +28,7 @@ config = { version = "0.15.27", default-features = false, features = ["toml"] }
 dotenvy = "0.15.7"
 diff-match-patch-rs = "0.5.1"
 encoding_rs = "0.8.42"
+futures-util = "0.3.31"
 glob = "0.3.4"
 hmac = "0.12.1"
 jsonwebtoken = { version = "11.1.0", features = ["rust_crypto"] }
@@ -46,7 +47,7 @@ similar = "3.2.0"
 socketioxide = "0.18.7"
 subtle = "2.6.1"
 thiserror = "2.0.21"
-tokio = { version = "1.53.2", features = ["signal"] }
+tokio = { version = "1.53.2", features = ["signal", "time"] }
 tokio-util = { version = "0.7.20", features = ["io"] }
 tower = "0.5.3"
 tower-http = "0.7.1"
@@ -57,3 +58,4 @@ utoipa = "6.0.0"
 utoipa-axum = "0.3.0"
 uuid = { version = "1.28.0", features = ["v4"] }
 zeroize = "1.9.1"
+zbus = { version = "5.19.0", default-features = false, features = ["tokio"] }

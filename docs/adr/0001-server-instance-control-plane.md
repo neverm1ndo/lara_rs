@@ -112,8 +112,9 @@ units, а операционная система ограничивает се�
 
 ## Наблюдение и readiness
 
-Systemd является источником истины о процессе. Наблюдатель использует как
-минимум следующие свойства:
+Systemd является источником истины о процессе. Read-only adapter использует
+system bus напрямую через `zbus` и не вызывает `systemctl`. Наблюдатель
+использует как минимум следующие свойства:
 
 - `ActiveState` и `SubState`;
 - `Result`;
@@ -138,10 +139,16 @@ Read-only state API возвращает нормализованные process 
 evidence: main PID, restart counter, invocation ID и нормализованную причину
 последнего завершения. Имена systemd units в HTTP-контракт не попадают.
 
+В Release A наблюдение включается явным `systemd_observation = true` только для
+одного auxiliary-инстанса. После подключения adapter делает initial snapshot,
+подписывается на `PropertiesChanged` и каждые 30 секунд выполняет reconciliation.
+При потере D-Bus сохраняется последнее evidence, но snapshot помечается как
+`stale`; до первого успешного чтения состояние остаётся `not_observed`.
+
 Journald используется для восстановления событий, произошедших во время
 остановки Lara. Для production требуется persistent journal. Периодический
 reconciliation страхует потерю live D-Bus-событий, но не является основным
-механизмом наблюдения.
+механизмом наблюдения. Replay journald остаётся за границами Release A.
 
 ## Команды и realtime
 
@@ -321,7 +328,9 @@ Release A создаёт фундамент без изменяющих producti
 Отрицательные и эксплуатационные затраты:
 
 - все управляемые серверы необходимо перевести на systemd;
-- потребуется D-Bus/polkit-конфигурация и Linux integration environment;
+- потребуется Linux integration environment; read-only наблюдение не требует
+  выдавать Lara право управлять units, а policy для будущих команд проектируется
+  отдельно;
 - MongoDB topology влияет на реализацию transactional outbox;
 - readiness основного сервера требует развития UDS-протокола;
 - capability manifest и versioned events становятся публичными контрактами;
@@ -362,7 +371,6 @@ plane управляет реестром локальных инстансов;
 Следующие решения принимаются отдельными ADR или implementation notes после
 коротких технических исследований:
 
-- конкретная Rust-библиотека для systemd D-Bus;
 - точная polkit/D-Bus policy production-хоста;
 - MongoDB transaction/outbox strategy для фактической topology;
 - формат UDS handshake и heartbeat;

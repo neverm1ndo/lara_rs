@@ -127,6 +127,7 @@ capabilities = [
 ]
 readiness = "uds"
 incident_tracking = true
+systemd_observation = false
 
 [[game_server.instances]]
 id = "dev-dm"
@@ -144,6 +145,7 @@ capabilities = [
 ]
 readiness = "process"
 incident_tracking = true
+systemd_observation = true
 
 [game_server.storage]
 root = "/srv/openmp/main"
@@ -283,6 +285,11 @@ storage roots, отсутствие `lifecycle`, а также `maps` или `ba
 production-файл объявляет auxiliary, в нём следует повторить и primary. Списки
 инстансов рекомендуется задавать в TOML через `LARA_CONFIG_FILE`, а не через
 переменные окружения.
+
+`systemd_observation = true` включает read-only D-Bus observer. В Release A
+разрешён ровно один такой пилотный auxiliary-инстанс; primary наблюдателем не
+затрагивается. По умолчанию флаг выключен, поэтому обновление Lara само по себе
+не начинает обращаться к systemd.
 
 Для совместимости конфигурация без `game_server.instances` создаёт implicit
 primary с ID из `game_server.primary_instance` (`main` по умолчанию), unit

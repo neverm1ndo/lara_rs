@@ -63,10 +63,14 @@ use crate::{
     },
     server_instances::{
         self,
-        application::{registry::InstanceRegistry, runtime_state::RuntimeStateReader},
+        application::{
+            registry::InstanceRegistry,
+            runtime_state::{RuntimeStateReader, RuntimeStateWriter},
+        },
         infrastructure::{
             config_registry::ConfiguredInstanceRegistry,
             runtime_state_store::InMemoryRuntimeStateStore,
+            systemd_observer::{SystemdObservationTarget, SystemdObserverWorker},
         },
     },
     shared::{
@@ -98,7 +102,10 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let application = build_application(config).await?;
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let maintenance = tokio::spawn(application.maintenance_worker.run(shutdown_rx));
+    let maintenance = tokio::spawn(application.maintenance_worker.run(shutdown_rx.clone()));
+    let systemd_observer = application
+        .systemd_observer
+        .map(|worker| tokio::spawn(worker.run(shutdown_rx)));
 
     info!(address = %bind_address, "HTTP server listening");
     let server_result = axum::serve(listener, application.router)
@@ -106,6 +113,9 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
         .await;
     let _ = shutdown_tx.send(true);
     maintenance.await?;
+    if let Some(observer) = systemd_observer {
+        observer.await?;
+    }
     server_result?;
     Ok(())
 }
@@ -113,12 +123,27 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
 struct BuiltApplication {
     router: Router,
     maintenance_worker: BackupMaintenanceWorker,
+    systemd_observer: Option<SystemdObserverWorker>,
 }
 
 async fn build_application(config: AppConfig) -> Result<BuiltApplication, BootstrapError> {
     let instance_registry = ConfiguredInstanceRegistry::from_config(&config.game_server)?;
-    let runtime_state_reader: Arc<dyn RuntimeStateReader> =
-        Arc::new(InMemoryRuntimeStateStore::new());
+    let runtime_states = Arc::new(InMemoryRuntimeStateStore::new());
+    let runtime_state_reader: Arc<dyn RuntimeStateReader> = runtime_states.clone();
+    let runtime_state_writer: Arc<dyn RuntimeStateWriter> = runtime_states;
+    let observation_targets: Vec<_> = instance_registry
+        .observed()
+        .map(|configured| {
+            let descriptor = configured.descriptor();
+            SystemdObservationTarget::new(
+                descriptor.id().clone(),
+                configured.systemd_unit().as_str(),
+                descriptor.observability().readiness(),
+            )
+        })
+        .collect();
+    let systemd_observer = (!observation_targets.is_empty())
+        .then(|| SystemdObserverWorker::new(observation_targets, runtime_state_writer));
     info!(
         instance_count = instance_registry.list().len(),
         primary_instance = %instance_registry.primary().id(),
@@ -333,6 +358,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     Ok(BuiltApplication {
         router: router.merge(auth::presentation::openapi_router(openapi)),
         maintenance_worker,
+        systemd_observer,
     })
 }
 

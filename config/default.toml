@@ -46,6 +46,7 @@ capabilities = [
 ]
 readiness = "uds"
 incident_tracking = true
+systemd_observation = false
 
 # Root of the primary managed SAMP/open.mp installation. Relative paths are resolved
 # from the server process working directory. Production deployments should
