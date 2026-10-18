@@ -684,6 +684,8 @@ mod tests {
                 database: "lara".into(),
             },
             game_server: super::super::model::GameServerConfig {
+                primary_instance: "main".into(),
+                instances: vec![],
                 storage: super::super::model::FileStorageConfig {
                     root: "D:/servers/openmp".into(),
                     max_tree_depth: 32,

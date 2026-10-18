@@ -39,6 +39,7 @@ TOML, а секреты и точечные переопределения пе�
 | `mysql.url` | `LARA_MYSQL__URL` |
 | `mongodb.uri` | `LARA_MONGODB__URI` |
 | `mongodb.database` | `LARA_MONGODB__DATABASE` |
+| `game_server.primary_instance` | `LARA_GAME_SERVER__PRIMARY_INSTANCE` |
 | `game_server.storage.root` | `LARA_GAME_SERVER__STORAGE__ROOT` |
 | `game_server.storage.max_tree_depth` | `LARA_GAME_SERVER__STORAGE__MAX_TREE_DEPTH` |
 | `game_server.storage.max_tree_entries` | `LARA_GAME_SERVER__STORAGE__MAX_TREE_ENTRIES` |
@@ -104,8 +105,48 @@ allowed_clock_skew_steps = 1
 [mongodb]
 database = "lara"
 
+[game_server]
+primary_instance = "main"
+
+# The array in an overlay replaces the default array, so repeat the primary
+# entry whenever auxiliary instances are declared.
+[[game_server.instances]]
+id = "main"
+display_name = "Main server"
+kind = "primary"
+environment = "production"
+sort_order = 10
+systemd_unit = "lara-game@main.service"
+capabilities = [
+    "overview",
+    "lifecycle",
+    "configuration",
+    "maps",
+    "backups",
+    "incidents",
+]
+readiness = "uds"
+incident_tracking = true
+
+[[game_server.instances]]
+id = "dev-dm"
+display_name = "Developer DM"
+kind = "auxiliary"
+environment = "development"
+sort_order = 20
+systemd_unit = "lara-game@dev-dm.service"
+storage_root = "/srv/openmp/dev-dm"
+capabilities = [
+    "overview",
+    "lifecycle",
+    "configuration",
+    "incidents",
+]
+readiness = "process"
+incident_tracking = true
+
 [game_server.storage]
-root = "/srv/openmp"
+root = "/srv/openmp/main"
 max_tree_depth = 32
 max_tree_entries = 10000
 max_stream_size_bytes = 10485760
@@ -225,6 +266,28 @@ Diff ограничивается `max_input_size_bytes` и
 Для однобайтовой Windows-1251 структурная проверка отбрасывает неназначенный
 байт `0x98`. Она не может достоверно отличить случайно присланный UTF-8 без BOM:
 последовательности байтов однобайтовых кодировок по своей природе неоднозначны.
+
+## Реестр игровых инстансов
+
+`game_server.primary_instance` ссылается на единственную запись `kind =
+"primary"`. Primary использует `game_server.storage.root`, если `storage_root`
+не указан непосредственно в его записи. Для auxiliary `storage_root`
+обязателен.
+
+Идентификатор содержит только строчные ASCII-буквы, цифры и внутренние дефисы.
+Имена systemd units должны оканчиваться на `.service`. При запуске приложение
+отклоняет дубли идентификаторов и units, несколько primary, перекрывающиеся
+storage roots, отсутствие `lifecycle`, а также `maps` или `backups` у auxiliary.
+
+Массив `game_server.instances` является атомарным значением TOML overlay: если
+production-файл объявляет auxiliary, в нём следует повторить и primary. Списки
+инстансов рекомендуется задавать в TOML через `LARA_CONFIG_FILE`, а не через
+переменные окружения.
+
+Для совместимости конфигурация без `game_server.instances` создаёт implicit
+primary с ID из `game_server.primary_instance` (`main` по умолчанию), unit
+`lara-game@<id>.service`, полным набором capabilities и UDS readiness. Этот
+режим предназначен для миграции и не позволяет объявлять auxiliary.
 
 Значение `game_server.storage.root` по умолчанию равно `./game-server` и
 разрешается относительно рабочей директории процесса. В production следует

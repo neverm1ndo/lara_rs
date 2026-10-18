@@ -76,7 +76,71 @@ pub struct MongoConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct GameServerConfig {
+    #[serde(default = "default_primary_instance")]
+    pub primary_instance: String,
+    #[serde(default)]
+    pub instances: Vec<ServerInstanceConfig>,
     pub storage: FileStorageConfig,
+}
+
+fn default_primary_instance() -> String {
+    "main".into()
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerInstanceConfig {
+    pub id: String,
+    pub display_name: String,
+    pub kind: InstanceKindConfig,
+    pub environment: InstanceEnvironmentConfig,
+    #[serde(default)]
+    pub sort_order: u32,
+    pub systemd_unit: String,
+    #[serde(default)]
+    pub storage_root: Option<PathBuf>,
+    #[serde(default)]
+    pub capabilities: Vec<InstanceCapabilityConfig>,
+    #[serde(default)]
+    pub readiness: Option<InstanceReadinessConfig>,
+    #[serde(default = "default_incident_tracking")]
+    pub incident_tracking: bool,
+}
+
+const fn default_incident_tracking() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceKindConfig {
+    Primary,
+    Auxiliary,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceEnvironmentConfig {
+    Production,
+    Development,
+    Testing,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceCapabilityConfig {
+    Overview,
+    Lifecycle,
+    Configuration,
+    Maps,
+    Backups,
+    Incidents,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceReadinessConfig {
+    Process,
+    Uds,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -196,6 +260,8 @@ mod tests {
                 database: "lara".into(),
             },
             game_server: GameServerConfig {
+                primary_instance: "main".into(),
+                instances: vec![],
                 storage: FileStorageConfig {
                     root: "D:/servers/openmp".into(),
                     max_tree_depth: 32,
@@ -337,6 +403,8 @@ mod tests {
         assert_eq!(config.mfa.totp_digits, 6);
         assert_eq!(config.mysql.url.expose_secret(), "mysql://localhost/lara");
         assert_eq!(config.mongodb.database, "lara");
+        assert_eq!(config.game_server.primary_instance, "main");
+        assert!(config.game_server.instances.is_empty());
         assert_eq!(
             config.game_server.storage.root,
             PathBuf::from("D:/servers/openmp")

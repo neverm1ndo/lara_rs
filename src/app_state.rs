@@ -11,6 +11,7 @@ use crate::{
     backups::{application::lifecycle::BackupLifecycleService, presentation::state::BackupsState},
     configuration::presentation::authorization::ConfigurationAuthorizationState,
     maps::{application::file_service::MapsFileService, presentation::state::MapsState},
+    server_instances::application::registry::InstanceRegistry,
     shared::file_storage::{path::RelativeStoragePath, upload::MultipartUploadLimits},
     user::{application::get_user::GetUser, presentation::state::UserState},
 };
@@ -21,6 +22,7 @@ pub struct AppState {
     mfa_login_service: Arc<dyn MfaLogin>,
     mfa_management_service: Arc<dyn ManageMfa>,
     get_user_service: Arc<dyn GetUser>,
+    instance_registry: Arc<dyn InstanceRegistry>,
     configurator_directory: RelativeStoragePath,
     maps_file_service: Arc<dyn MapsFileService>,
     maps_upload_limits: MultipartUploadLimits,
@@ -34,6 +36,7 @@ impl AppState {
         mfa_login_service: impl MfaLogin + 'static,
         mfa_management_service: impl ManageMfa + 'static,
         get_user_service: impl GetUser + 'static,
+        instance_registry: impl InstanceRegistry + 'static,
         configurator_directory: RelativeStoragePath,
         maps_file_service: impl MapsFileService + 'static,
         maps_upload_limits: MultipartUploadLimits,
@@ -44,11 +47,17 @@ impl AppState {
             mfa_login_service: Arc::new(mfa_login_service),
             mfa_management_service: Arc::new(mfa_management_service),
             get_user_service: Arc::new(get_user_service),
+            instance_registry: Arc::new(instance_registry),
             configurator_directory,
             maps_file_service: Arc::new(maps_file_service),
             maps_upload_limits,
             backup_lifecycle_service,
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn instance_registry(&self) -> Arc<dyn InstanceRegistry> {
+        Arc::clone(&self.instance_registry)
     }
 }
 

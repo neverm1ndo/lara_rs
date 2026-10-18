@@ -61,6 +61,10 @@ use crate::{
         domain::{MAPS_STORAGE_NAMESPACE, MapFilePolicy},
         infrastructure::file_service::LocalMapsFileService,
     },
+    server_instances::{
+        application::registry::InstanceRegistry,
+        infrastructure::config_registry::ConfiguredInstanceRegistry,
+    },
     shared::{
         config::{AppConfig, model::BackupCompression},
         file_storage::{
@@ -108,6 +112,12 @@ struct BuiltApplication {
 }
 
 async fn build_application(config: AppConfig) -> Result<BuiltApplication, BootstrapError> {
+    let instance_registry = ConfiguredInstanceRegistry::from_config(&config.game_server)?;
+    info!(
+        instance_count = instance_registry.list().len(),
+        primary_instance = %instance_registry.primary().id(),
+        "server instance registry loaded"
+    );
     let configurator_directory =
         RelativeStoragePath::try_from(config.configuration.files.configurator_directory.as_path())?;
     let maps_directory = RelativeStoragePath::try_from(config.maps.files.directory.as_path())?;
@@ -295,6 +305,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         mfa_login_service,
         mfa_management_service,
         get_user_service,
+        instance_registry,
         configurator_directory,
         maps_file_service,
         maps_upload_limits,
