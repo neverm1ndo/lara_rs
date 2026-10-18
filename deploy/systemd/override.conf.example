@@ -1,0 +1,11 @@
+# Copy this file to:
+# /etc/systemd/system/lara-game@<instance-id>.service.d/override.conf
+# only when an existing pilot cannot yet use /srv/openmp/<instance-id>.
+# Values are examples and must be replaced with absolute host paths.
+
+[Service]
+WorkingDirectory=/absolute/path/to/instance
+ExecStart=
+ExecStart=/absolute/path/to/instance/omp-server
+ReadWritePaths=
+ReadWritePaths=/absolute/path/to/instance

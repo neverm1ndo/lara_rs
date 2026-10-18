@@ -289,6 +289,11 @@ primary с ID из `game_server.primary_instance` (`main` по умолчани�
 `lara-game@<id>.service`, полным набором capabilities и UDS readiness. Этот
 режим предназначен для миграции и не позволяет объявлять auxiliary.
 
+Шаблон systemd unit, read-only проверка пилота, порядок cutover и rollback
+находятся в [`deploy/systemd`](../deploy/systemd/README.md). Старый Node/bash
+supervisor необходимо отключить для выбранного инстанса до запуска нового unit,
+иначе на одном порту могут одновременно стартовать два процесса.
+
 Значение `game_server.storage.root` по умолчанию равно `./game-server` и
 разрешается относительно рабочей директории процесса. В production следует
 задавать абсолютный путь. Проверка существования и canonicalization корня
