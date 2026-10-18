@@ -11,7 +11,10 @@ use thiserror::Error;
 
 use crate::auth::{
     application::session_repository::SessionRepository,
-    domain::models::{InvalidIdentifier, Session, SessionId, UserId},
+    domain::{
+        mfa::AuthenticationMethod,
+        models::{InvalidIdentifier, Session, SessionId, UserId},
+    },
 };
 
 const SESSION_COLLECTION: &str = "auth_sessions";
@@ -26,6 +29,8 @@ struct SessionDocument {
     expires_at: BsonDateTime,
     #[serde(default)]
     revoked_at: Option<BsonDateTime>,
+    #[serde(default)]
+    authentication_method: Option<String>,
 }
 
 #[derive(Debug, Error)]
@@ -36,6 +41,8 @@ pub enum SessionRepositoryError {
     InvalidIdentifier(#[from] InvalidIdentifier),
     #[error("database returned an invalid session timestamp")]
     InvalidTimestamp,
+    #[error("database returned an invalid authentication method")]
+    InvalidAuthenticationMethod,
 }
 
 #[derive(Clone)]
@@ -99,6 +106,20 @@ impl SessionRepository for MongoSessionRepository {
 
         document.map(TryInto::try_into).transpose()
     }
+
+    async fn revoke(
+        &self,
+        session_id: &SessionId,
+        revoked_at: DateTime<Utc>,
+    ) -> Result<(), Self::Error> {
+        self.sessions
+            .update_one(
+                doc! { "_id": session_id.as_str() },
+                doc! { "$set": { "revoked_at": BsonDateTime::from_millis(revoked_at.timestamp_millis()) } },
+            )
+            .await?;
+        Ok(())
+    }
 }
 
 impl From<&Session> for SessionDocument {
@@ -110,6 +131,9 @@ impl From<&Session> for SessionDocument {
             revoked_at: session
                 .revoked_at
                 .map(|value| BsonDateTime::from_millis(value.timestamp_millis())),
+            authentication_method: Some(
+                authentication_method_name(session.authentication_method).into(),
+            ),
         }
     }
 }
@@ -123,7 +147,32 @@ impl TryFrom<SessionDocument> for Session {
             user_id: UserId::new(document.user_id)?,
             expires_at: from_bson_datetime(document.expires_at)?,
             revoked_at: document.revoked_at.map(from_bson_datetime).transpose()?,
+            authentication_method: parse_authentication_method(
+                document
+                    .authentication_method
+                    .as_deref()
+                    .unwrap_or("password"),
+            )?,
         })
+    }
+}
+
+fn authentication_method_name(method: AuthenticationMethod) -> &'static str {
+    match method {
+        AuthenticationMethod::Password => "password",
+        AuthenticationMethod::PasswordTotp => "password_totp",
+        AuthenticationMethod::PasswordRecoveryCode => "password_recovery_code",
+    }
+}
+
+fn parse_authentication_method(
+    value: &str,
+) -> Result<AuthenticationMethod, SessionRepositoryError> {
+    match value {
+        "password" => Ok(AuthenticationMethod::Password),
+        "password_totp" => Ok(AuthenticationMethod::PasswordTotp),
+        "password_recovery_code" => Ok(AuthenticationMethod::PasswordRecoveryCode),
+        _ => Err(SessionRepositoryError::InvalidAuthenticationMethod),
     }
 }
 
@@ -143,6 +192,7 @@ mod tests {
             user_id: 42,
             expires_at: BsonDateTime::from_millis(2_000_000),
             revoked_at: None,
+            authentication_method: None,
         };
 
         let session = Session::try_from(document).unwrap();
@@ -151,6 +201,10 @@ mod tests {
         assert_eq!(session.user_id, UserId::new(42).unwrap());
         assert_eq!(session.expires_at.timestamp_millis(), 2_000_000);
         assert_eq!(session.revoked_at, None);
+        assert_eq!(
+            session.authentication_method,
+            AuthenticationMethod::Password
+        );
     }
 
     #[test]
@@ -160,6 +214,7 @@ mod tests {
             user_id: UserId::new(42).unwrap(),
             expires_at: DateTime::from_timestamp_millis(2_000_000).unwrap(),
             revoked_at: Some(DateTime::from_timestamp_millis(1_000_000).unwrap()),
+            authentication_method: AuthenticationMethod::PasswordTotp,
         };
 
         let document = SessionDocument::from(&session);
@@ -168,6 +223,10 @@ mod tests {
         assert_eq!(document.user_id, 42);
         assert_eq!(document.expires_at.timestamp_millis(), 2_000_000);
         assert_eq!(document.revoked_at.unwrap().timestamp_millis(), 1_000_000);
+        assert_eq!(
+            document.authentication_method.as_deref(),
+            Some("password_totp")
+        );
     }
 
     #[test]
@@ -177,11 +236,16 @@ mod tests {
             user_id: 42,
             expires_at: BsonDateTime::from_millis(2_000_000),
             revoked_at: Some(BsonDateTime::from_millis(1_000_000)),
+            authentication_method: Some("password_recovery_code".into()),
         };
 
         let session = Session::try_from(document).unwrap();
 
         assert_eq!(session.revoked_at.unwrap().timestamp_millis(), 1_000_000);
+        assert_eq!(
+            session.authentication_method,
+            AuthenticationMethod::PasswordRecoveryCode
+        );
     }
 
     #[test]
@@ -191,6 +255,7 @@ mod tests {
             user_id: 0,
             expires_at: BsonDateTime::from_millis(2_000_000),
             revoked_at: None,
+            authentication_method: None,
         };
 
         assert!(Session::try_from(document).is_err());
@@ -203,11 +268,28 @@ mod tests {
             user_id: 42,
             expires_at: BsonDateTime::from_millis(i64::MAX),
             revoked_at: None,
+            authentication_method: None,
         };
 
         assert!(matches!(
             Session::try_from(document),
             Err(SessionRepositoryError::InvalidTimestamp)
+        ));
+    }
+
+    #[test]
+    fn rejects_unknown_authentication_method() {
+        let document = SessionDocument {
+            id: "session-1".into(),
+            user_id: 42,
+            expires_at: BsonDateTime::from_millis(2_000_000),
+            revoked_at: None,
+            authentication_method: Some("password_magic".into()),
+        };
+
+        assert!(matches!(
+            Session::try_from(document),
+            Err(SessionRepositoryError::InvalidAuthenticationMethod)
         ));
     }
 }

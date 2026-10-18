@@ -14,7 +14,10 @@ use crate::auth::{
         session_id_generator::SessionIdGenerator,
         session_repository::SessionRepository,
     },
-    domain::models::{AuthenticatedUser, JwtClaims, Session},
+    domain::{
+        mfa::AuthenticationMethod,
+        models::{AuthenticatedUser, JwtClaims, Session, UserId},
+    },
 };
 
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
@@ -52,6 +55,10 @@ pub trait Login: Send + Sync {
 
 pub struct LoginService<P, U, S, G, J> {
     credentials: CredentialAuthenticationService<P, U>,
+    session_issuer: AuthenticatedSessionIssuer<S, G, J>,
+}
+
+pub struct AuthenticatedSessionIssuer<S, G, J> {
     sessions: S,
     session_ids: G,
     jwt_issuer: J,
@@ -65,6 +72,31 @@ impl<P, U, S, G, J> LoginService<P, U, S, G, J> {
     pub fn new(
         password_verifier: P,
         users: U,
+        sessions: S,
+        session_ids: G,
+        jwt_issuer: J,
+        issuer: impl Into<String>,
+        audience: impl Into<String>,
+        ttl_seconds: i64,
+    ) -> Result<Self, LoginConfigurationError> {
+        let session_issuer = AuthenticatedSessionIssuer::new(
+            sessions,
+            session_ids,
+            jwt_issuer,
+            issuer,
+            audience,
+            ttl_seconds,
+        )?;
+
+        Ok(Self {
+            credentials: CredentialAuthenticationService::new(password_verifier, users),
+            session_issuer,
+        })
+    }
+}
+
+impl<S, G, J> AuthenticatedSessionIssuer<S, G, J> {
+    pub fn new(
         sessions: S,
         session_ids: G,
         jwt_issuer: J,
@@ -87,7 +119,6 @@ impl<P, U, S, G, J> LoginService<P, U, S, G, J> {
             .ok_or(LoginConfigurationError::InvalidTtl)?;
 
         Ok(Self {
-            credentials: CredentialAuthenticationService::new(password_verifier, users),
             sessions,
             session_ids,
             jwt_issuer,
@@ -113,6 +144,28 @@ where
             .await
             .map_err(LoginError::from)?;
 
+        self.session_issuer
+            .issue(
+                verified.user_id,
+                verified.user,
+                AuthenticationMethod::Password,
+            )
+            .await
+    }
+}
+
+impl<S, G, J> AuthenticatedSessionIssuer<S, G, J>
+where
+    S: SessionRepository,
+    G: SessionIdGenerator,
+    J: JwtIssuer,
+{
+    pub async fn issue(
+        &self,
+        user_id: UserId,
+        user: AuthenticatedUser,
+        authentication_method: AuthenticationMethod,
+    ) -> Result<LoginResult, LoginError> {
         // JWT timestamps have second precision. Truncating once keeps JWT
         // `exp` and the MongoDB session expiration exactly aligned.
         let issued_at = Utc::now()
@@ -124,7 +177,7 @@ where
         let session_id = self.session_ids.generate();
 
         let claims = JwtClaims {
-            sub: verified.user_id,
+            sub: user_id,
             sid: session_id.clone(),
             exp: expires_at.timestamp(),
             iat: issued_at.timestamp(),
@@ -142,9 +195,10 @@ where
 
         let session = Session {
             id: session_id,
-            user_id: verified.user_id,
+            user_id,
             expires_at,
             revoked_at: None,
+            authentication_method,
         };
         self.sessions.create(&session).await.map_err(|error| {
             tracing::error!(
@@ -159,7 +213,7 @@ where
         Ok(LoginResult {
             access_token,
             expires_at,
-            user: verified.user,
+            user,
         })
     }
 }
@@ -257,6 +311,14 @@ mod tests {
         ) -> impl Future<Output = Result<Option<Session>, Self::Error>> + Send {
             future::ready(Ok(None))
         }
+
+        fn revoke(
+            &self,
+            _session_id: &SessionId,
+            _revoked_at: DateTime<Utc>,
+        ) -> impl Future<Output = Result<(), Self::Error>> + Send {
+            future::ready(Ok(()))
+        }
     }
 
     struct SessionIds;
@@ -337,6 +399,10 @@ mod tests {
         assert_eq!(claims.iss, "lara");
         assert_eq!(claims.aud, "lara-api");
         assert_eq!(session.revoked_at, None);
+        assert_eq!(
+            session.authentication_method,
+            AuthenticationMethod::Password
+        );
     }
 
     #[tokio::test]
