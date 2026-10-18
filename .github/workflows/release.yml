@@ -97,6 +97,7 @@ jobs:
           grep -Fx 'usr/share/lara-rs/config/default.toml' /tmp/lara-package-files
           grep -Fx 'usr/lib/lara-rs/verify-pilot' /tmp/lara-package-files
           grep -Fx 'usr/share/doc/lara-rs/examples/production.toml.example' /tmp/lara-package-files
+          grep -Fx 'usr/share/doc/lara-rs/changelog.Debian.gz' /tmp/lara-package-files
           grep -Eq '^(usr/)?lib/systemd/system/lara-rs\.service$' /tmp/lara-package-files
           grep -Eq '^(usr/)?lib/systemd/system/lara-game@\.service$' /tmp/lara-package-files
 

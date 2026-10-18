@@ -1,0 +1,7 @@
+lara-rs (0.2.2-1) unstable; urgency=medium
+
+  * Add the Release A server-instance registry and capability manifest.
+  * Package the game-server systemd template under its correct unit name.
+  * Include the Debian changelog required by package policy checks.
+
+ -- neverm1ndo <it@nmnd.ru>  Sun, 18 Oct 2026 18:30:00 +0300

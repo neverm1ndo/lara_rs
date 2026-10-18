@@ -13,7 +13,7 @@ Release artifact рассчитан на Debian 12 (`amd64`). Пакет уст�
 секреты.
 
 ```sh
-sudo apt install ./lara-rs_0.2.1-1_amd64.deb
+sudo apt install ./lara-rs_0.2.2-1_amd64.deb
 
 sudo install -o root -g lara -m 0640 \
   /usr/share/doc/lara-rs/examples/lara.env.example \

@@ -1,6 +1,6 @@
 [package]
 name = "lara-rs"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 authors = ["neverm1ndo <it@nmnd.ru>"]
 license = "MIT"
@@ -19,6 +19,7 @@ section = "admin"
 priority = "optional"
 depends = "$auto, adduser, systemd"
 maintainer-scripts = "debian"
+changelog = "debian/changelog"
 assets = [
     ["target/release/lara-rs", "usr/bin/", "755"],
     ["config/default.toml", "usr/share/lara-rs/config/default.toml", "644"],
