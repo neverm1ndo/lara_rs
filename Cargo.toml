@@ -1,6 +1,6 @@
 [package]
 name = "lara-rs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2024"
 authors = ["neverm1ndo <it@nmnd.ru>"]
 license = "MIT"
@@ -28,10 +28,10 @@ assets = [
     ["deploy/systemd/production.toml.example", "usr/share/doc/lara-rs/examples/production.toml.example", "644"],
     ["deploy/systemd/README.md", "usr/share/doc/lara-rs/systemd-pilot.md", "644"],
     ["deploy/systemd/verify-pilot.sh", "usr/lib/lara-rs/verify-pilot", "755"],
+    ["deploy/systemd/lara-game@.service", "usr/lib/systemd/system/lara-game@.service", "644"],
 ]
 systemd-units = [
     { unit-name = "lara-rs", unit-scripts = "deploy/systemd", enable = false, start = false },
-    { unit-name = "lara-game", unit-scripts = "deploy/systemd", enable = false, start = false },
 ]
 
 [dependencies]
