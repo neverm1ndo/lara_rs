@@ -18,6 +18,7 @@ use crate::{
     },
     server_instances::{
         application::{
+            lifecycle_service::LifecycleOperationService,
             registry::InstanceRegistry,
             runtime_state::{RuntimeStateReader, RuntimeStateRepositoryError},
         },
@@ -106,6 +107,10 @@ impl ServerInstancesState for TestState {
 
     fn runtime_state_reader(&self) -> Arc<dyn RuntimeStateReader> {
         Arc::clone(&self.states)
+    }
+
+    fn lifecycle_operation_service(&self) -> Arc<LifecycleOperationService> {
+        panic!("lifecycle endpoints use their dedicated application tests")
     }
 }
 
@@ -240,7 +245,7 @@ async fn developer_receives_all_instances_without_internal_runtime_configuration
     );
     assert_eq!(
         body["instances"][1]["features"]["lara.lifecycle.v1"]["permissions"],
-        serde_json::json!(["read"])
+        serde_json::json!(["read", "start", "stop", "restart"])
     );
     for forbidden in ["systemdUnit", "storageRoot", "udsPath"] {
         assert!(!body.to_string().contains(forbidden), "exposed {forbidden}");

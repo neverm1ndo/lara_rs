@@ -93,6 +93,9 @@ pub struct FeatureAccess {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FeaturePermission {
     Read,
+    Start,
+    Stop,
+    Restart,
     Write,
     UploadArtifact,
     Restore,
@@ -103,6 +106,9 @@ impl FeaturePermission {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
             Self::Write => "write",
             Self::UploadArtifact => "upload_artifact",
             Self::Restore => "restore",
@@ -152,7 +158,7 @@ fn project_instance(
         .capabilities()
         .iter()
         .filter_map(|capability| {
-            permissions_for(capability, subject, developer)
+            permissions_for(capability, subject, developer, instance.management())
                 .map(|access| (feature_id(capability), access))
         })
         .collect();
@@ -178,9 +184,18 @@ fn permissions_for(
     capability: InstanceCapability,
     subject: &ManifestSubject,
     developer: bool,
+    management: InstanceManagement,
 ) -> Option<FeatureAccess> {
     let permissions = match capability {
         InstanceCapability::Overview => vec![FeaturePermission::Read],
+        InstanceCapability::Lifecycle if developer && management == InstanceManagement::Systemd => {
+            vec![
+                FeaturePermission::Read,
+                FeaturePermission::Start,
+                FeaturePermission::Stop,
+                FeaturePermission::Restart,
+            ]
+        }
         InstanceCapability::Lifecycle if developer => vec![FeaturePermission::Read],
         InstanceCapability::Configuration if developer => vec![
             FeaturePermission::Read,
@@ -326,7 +341,12 @@ mod tests {
         assert_eq!(manifest.instances[1].features.len(), 4);
         assert_eq!(
             manifest.instances[1].features[&FeatureId::Lifecycle].permissions,
-            [FeaturePermission::Read]
+            [
+                FeaturePermission::Read,
+                FeaturePermission::Start,
+                FeaturePermission::Stop,
+                FeaturePermission::Restart,
+            ]
         );
         assert!(
             !manifest.instances[1]

@@ -9,7 +9,8 @@ use crate::{
         application::{
             lifecycle_operations::{
                 LifecycleOperationClock, LifecycleOperationIdGenerator,
-                LifecycleOperationRepository, LifecycleOperationRepositoryError,
+                LifecycleOperationListQuery, LifecycleOperationRepository,
+                LifecycleOperationRepositoryError,
             },
             lifecycle_runtime::{LifecycleRuntime, LifecycleRuntimeError},
             registry::InstanceRegistry,
@@ -124,6 +125,33 @@ impl LifecycleOperationService {
             LifecycleCommandDisposition::Created,
         )
         .await
+    }
+
+    pub async fn get(
+        &self,
+        subject: &LifecycleSubject,
+        instance_id: &ServerInstanceId,
+        operation_id: LifecycleOperationId,
+    ) -> Result<LifecycleOperation, LifecycleOperationServiceError> {
+        self.authorize_read(subject, instance_id)?;
+        self.operations
+            .find_by_id(operation_id)
+            .await?
+            .filter(|operation| operation.instance_id() == instance_id)
+            .ok_or(LifecycleOperationServiceError::OperationNotFound)
+    }
+
+    pub async fn list(
+        &self,
+        subject: &LifecycleSubject,
+        instance_id: &ServerInstanceId,
+        query: LifecycleOperationListQuery,
+    ) -> Result<Vec<LifecycleOperation>, LifecycleOperationServiceError> {
+        self.authorize_read(subject, instance_id)?;
+        self.operations
+            .list_for_instance(instance_id, query)
+            .await
+            .map_err(Into::into)
     }
 
     pub async fn reconcile(
@@ -270,6 +298,20 @@ impl LifecycleOperationService {
             state.restart_count(),
             state.invocation_id().map(str::to_owned),
         ))
+    }
+
+    fn authorize_read(
+        &self,
+        subject: &LifecycleSubject,
+        instance_id: &ServerInstanceId,
+    ) -> Result<(), LifecycleOperationServiceError> {
+        if !subject.is_developer() {
+            return Err(LifecycleOperationServiceError::Forbidden);
+        }
+        self.registry
+            .get(instance_id)
+            .ok_or(LifecycleOperationServiceError::InstanceNotFound)?;
+        Ok(())
     }
 }
 
@@ -1006,5 +1048,53 @@ mod tests {
         );
         assert!(recovered.operation.final_evidence().is_some());
         assert_eq!(fixture.runtime.calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn history_reads_require_developer_and_match_the_instance_path() {
+        let fixture = fixture(successful_job());
+        let developer = subject(UserRole::Developer, 42);
+        let created = fixture
+            .service
+            .request(&developer, command(LifecycleAction::Start, "request-1"))
+            .await
+            .unwrap()
+            .operation;
+        let instance_id = ServerInstanceId::new("test").unwrap();
+
+        let found = fixture
+            .service
+            .get(&developer, &instance_id, created.id())
+            .await
+            .unwrap();
+        let listed = fixture
+            .service
+            .list(
+                &developer,
+                &instance_id,
+                LifecycleOperationListQuery::new(None, 50).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(found.id(), created.id());
+        assert_eq!(listed.len(), 1);
+        assert!(matches!(
+            fixture
+                .service
+                .get(&subject(UserRole::Admin, 42), &instance_id, created.id(),)
+                .await,
+            Err(LifecycleOperationServiceError::Forbidden)
+        ));
+        assert!(matches!(
+            fixture
+                .service
+                .get(
+                    &developer,
+                    &ServerInstanceId::new("main").unwrap(),
+                    created.id(),
+                )
+                .await,
+            Err(LifecycleOperationServiceError::OperationNotFound)
+        ));
     }
 }

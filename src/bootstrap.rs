@@ -64,14 +64,19 @@ use crate::{
     server_instances::{
         self,
         application::{
+            lifecycle_service::LifecycleOperationService,
             registry::InstanceRegistry,
             runtime_state::{RuntimeStateReader, RuntimeStateWriter},
         },
         infrastructure::{
             config_registry::ConfiguredInstanceRegistry,
             lifecycle_operation_repository::MongoLifecycleOperationRepository,
+            lifecycle_operation_support::{
+                SystemLifecycleOperationClock, UuidLifecycleOperationIdGenerator,
+            },
             runtime_state_store::InMemoryRuntimeStateStore,
             systemd_observer::{SystemdObservationTarget, SystemdObserverWorker},
+            systemd_runtime::SystemdLifecycleRuntime,
         },
     },
     shared::{
@@ -97,6 +102,7 @@ use crate::{
 
 type BootstrapError = Box<dyn Error + Send + Sync>;
 const CURRENT_MFA_ENCRYPTION_KEY_VERSION: u32 = 1;
+const LIFECYCLE_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let bind_address = config.server.bind_address;
@@ -128,7 +134,9 @@ struct BuiltApplication {
 }
 
 async fn build_application(config: AppConfig) -> Result<BuiltApplication, BootstrapError> {
-    let instance_registry = ConfiguredInstanceRegistry::from_config(&config.game_server)?;
+    let instance_registry = Arc::new(ConfiguredInstanceRegistry::from_config(
+        &config.game_server,
+    )?);
     let runtime_states = Arc::new(InMemoryRuntimeStateStore::new());
     let runtime_state_reader: Arc<dyn RuntimeStateReader> = runtime_states.clone();
     let runtime_state_writer: Arc<dyn RuntimeStateWriter> = runtime_states;
@@ -184,8 +192,23 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let mfa_factors: Arc<dyn MfaFactorRepository> = Arc::new(mfa_factor_repository);
     let mfa_challenges: Arc<dyn MfaChallengeRepository> = Arc::new(mfa_challenge_repository);
 
-    let lifecycle_operations = MongoLifecycleOperationRepository::new(mongo_database.clone());
+    let lifecycle_operations = Arc::new(MongoLifecycleOperationRepository::new(
+        mongo_database.clone(),
+    ));
     lifecycle_operations.ensure_indexes().await?;
+    let lifecycle_runtime = Arc::new(SystemdLifecycleRuntime::from_registry(
+        instance_registry.as_ref(),
+    ));
+    let registry_port: Arc<dyn InstanceRegistry> = instance_registry.clone();
+    let lifecycle_operation_service = Arc::new(LifecycleOperationService::new(
+        registry_port.clone(),
+        lifecycle_operations,
+        lifecycle_runtime,
+        runtime_state_reader.clone(),
+        Arc::new(SystemLifecycleOperationClock),
+        Arc::new(UuidLifecycleOperationIdGenerator),
+        LIFECYCLE_OPERATION_TIMEOUT,
+    )?);
 
     let totp_secret_generator: Arc<dyn TotpSecretGenerator> = Arc::new(OsTotpSecretGenerator);
     let totp_cipher: Arc<dyn TotpSecretCipher> = Arc::new(Aes256GcmTotpSecretCipher::from_hex(
@@ -343,8 +366,9 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         mfa_login_service,
         mfa_management_service,
         get_user_service,
-        instance_registry,
+        registry_port,
         runtime_state_reader,
+        lifecycle_operation_service,
         configurator_directory,
         maps_file_service,
         maps_upload_limits,
@@ -403,7 +427,10 @@ mod tests {
         },
         maps::{application::file_service::MapsFileService, presentation::state::MapsState},
         server_instances::{
-            application::{registry::InstanceRegistry, runtime_state::RuntimeStateReader},
+            application::{
+                lifecycle_service::LifecycleOperationService, registry::InstanceRegistry,
+                runtime_state::RuntimeStateReader,
+            },
             presentation::state::ServerInstancesState,
         },
         shared::file_storage::upload::MultipartUploadLimits,
@@ -458,6 +485,10 @@ mod tests {
 
         fn runtime_state_reader(&self) -> Arc<dyn RuntimeStateReader> {
             panic!("documentation generation does not resolve application ports")
+        }
+
+        fn lifecycle_operation_service(&self) -> Arc<LifecycleOperationService> {
+            panic!("documentation generation does not resolve application services")
         }
     }
 

@@ -2,13 +2,16 @@ use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
 use super::dto::{
-    FeatureAccessResponse, FeaturePermissionResponse, InstanceEnvironmentResponse,
-    InstanceKindResponse, InstanceManagementResponse, InstanceManifestResponse,
-    InstanceReadinessResponse, ManifestInstanceResponse, ManifestObservabilityResponse,
-    ObservationStatusResponse, ProcessStateResponse, ProcessStatusResponse,
-    ReadinessStatusResponse, RuntimeObservationResponse, RuntimeReadinessResponse,
-    RuntimeStateResponse, ServerInstanceErrorResponse, TerminationEvidenceResponse,
-    TerminationKindResponse,
+    CreateLifecycleOperationRequest, FeatureAccessResponse, FeaturePermissionResponse,
+    InstanceEnvironmentResponse, InstanceKindResponse, InstanceManagementResponse,
+    InstanceManifestResponse, InstanceReadinessResponse, LifecycleActionRequest,
+    LifecycleActionResponse, LifecycleEvidenceResponse, LifecycleExpectedStateResponse,
+    LifecycleFailureCodeResponse, LifecycleOperationCursorResponse, LifecycleOperationListResponse,
+    LifecycleOperationResponse, LifecycleOperationStatusResponse, ManifestInstanceResponse,
+    ManifestObservabilityResponse, ObservationStatusResponse, ProcessStateResponse,
+    ProcessStatusResponse, ReadinessStatusResponse, RuntimeObservationResponse,
+    RuntimeReadinessResponse, RuntimeStateResponse, ServerInstanceErrorResponse,
+    TerminationEvidenceResponse, TerminationKindResponse,
 };
 
 const BEARER_AUTH_SCHEME: &str = "bearerAuth";
@@ -34,6 +37,16 @@ const BEARER_AUTH_SCHEME: &str = "bearerAuth";
         ObservationStatusResponse,
         TerminationEvidenceResponse,
         TerminationKindResponse,
+        CreateLifecycleOperationRequest,
+        LifecycleActionRequest,
+        LifecycleOperationListResponse,
+        LifecycleOperationCursorResponse,
+        LifecycleOperationResponse,
+        LifecycleActionResponse,
+        LifecycleOperationStatusResponse,
+        LifecycleExpectedStateResponse,
+        LifecycleFailureCodeResponse,
+        LifecycleEvidenceResponse,
         ServerInstanceErrorResponse
     )),
     modifiers(&BearerSecurity),
@@ -79,7 +92,10 @@ mod tests {
             presentation::extractors::JwtExtractorState,
         },
         server_instances::{
-            application::{registry::InstanceRegistry, runtime_state::RuntimeStateReader},
+            application::{
+                lifecycle_service::LifecycleOperationService, registry::InstanceRegistry,
+                runtime_state::RuntimeStateReader,
+            },
             presentation::state::ServerInstancesState,
         },
     };
@@ -101,6 +117,10 @@ mod tests {
         fn runtime_state_reader(&self) -> Arc<dyn RuntimeStateReader> {
             panic!("documentation generation does not resolve application ports")
         }
+
+        fn lifecycle_operation_service(&self) -> Arc<LifecycleOperationService> {
+            panic!("documentation generation does not resolve application services")
+        }
     }
 
     #[test]
@@ -119,5 +139,18 @@ mod tests {
         assert!(specification["components"]["schemas"]["InstanceManifestResponse"].is_object());
         assert!(specification["paths"]["/server-instances/{instance_id}/state"]["get"].is_object());
         assert!(specification["components"]["schemas"]["RuntimeStateResponse"].is_object());
+        assert!(
+            specification["paths"]["/server-instances/{instance_id}/operations"]["post"]
+                .is_object()
+        );
+        assert!(
+            specification["paths"]["/server-instances/{instance_id}/operations"]["get"].is_object()
+        );
+        assert!(
+            specification["paths"]
+                ["/server-instances/{instance_id}/operations/{operation_id}"]["get"]
+                .is_object()
+        );
+        assert!(specification["components"]["schemas"]["LifecycleOperationResponse"].is_object());
     }
 }
