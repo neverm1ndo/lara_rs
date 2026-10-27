@@ -4,7 +4,7 @@ use chrono::{DateTime, Utc};
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::{ProcessState, ReadinessStatus, ServerInstanceId};
+use super::{ObservationStatus, ProcessState, ReadinessStatus, ServerInstanceId};
 
 const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 const MAX_ACTOR_NAME_BYTES: usize = 100;
@@ -157,6 +157,7 @@ pub enum LifecycleFailureCode {
 pub struct LifecycleOperationEvidence {
     process: ProcessState,
     readiness: ReadinessStatus,
+    observation: ObservationStatus,
     observed_at: Option<DateTime<Utc>>,
     restart_count: Option<u32>,
     invocation_id: Option<String>,
@@ -166,6 +167,7 @@ impl LifecycleOperationEvidence {
     pub fn new(
         process: ProcessState,
         readiness: ReadinessStatus,
+        observation: ObservationStatus,
         observed_at: Option<DateTime<Utc>>,
         restart_count: Option<u32>,
         invocation_id: Option<String>,
@@ -173,6 +175,7 @@ impl LifecycleOperationEvidence {
         Self {
             process,
             readiness,
+            observation,
             observed_at,
             restart_count,
             invocation_id: invocation_id.filter(|value| !value.trim().is_empty()),
@@ -185,6 +188,10 @@ impl LifecycleOperationEvidence {
 
     pub const fn readiness(&self) -> ReadinessStatus {
         self.readiness
+    }
+
+    pub const fn observation(&self) -> ObservationStatus {
+        self.observation
     }
 
     pub const fn observed_at(&self) -> Option<DateTime<Utc>> {
@@ -379,6 +386,27 @@ impl LifecycleOperation {
         })
     }
 
+    /// Completes an operation whose systemd command was durably marked as
+    /// dispatching but whose job reference could not be persisted (for
+    /// example, because Lara stopped after receiving the D-Bus reply).
+    /// Application reconciliation must supply independently observed final
+    /// evidence before using this recovery transition.
+    pub fn recover_succeeded_after_dispatch(
+        &mut self,
+        evidence: LifecycleOperationEvidence,
+        at: DateTime<Utc>,
+    ) -> Result<(), InvalidLifecycleOperation> {
+        if self.state != LifecycleOperationState::Dispatching {
+            return Err(InvalidLifecycleOperation::Transition);
+        }
+        self.advance_time(at)?;
+        self.state = LifecycleOperationState::Succeeded;
+        self.final_evidence = Some(evidence);
+        self.completed_at = Some(at);
+        self.version = self.version.next()?;
+        Ok(())
+    }
+
     pub fn fail(
         &mut self,
         code: LifecycleFailureCode,
@@ -550,6 +578,7 @@ mod tests {
         LifecycleOperationEvidence::new(
             process,
             ReadinessStatus::Ready,
+            ObservationStatus::Observed,
             DateTime::from_timestamp(1_700_000_000, 0),
             Some(2),
             Some("invocation-1".into()),

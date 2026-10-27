@@ -50,6 +50,14 @@ pub trait LifecycleOperationRepository: Send + Sync {
     ) -> LifecycleOperationRepositoryFuture<'a, ()>;
 }
 
+pub trait LifecycleOperationClock: Send + Sync {
+    fn now(&self) -> DateTime<Utc>;
+}
+
+pub trait LifecycleOperationIdGenerator: Send + Sync {
+    fn next_id(&self) -> LifecycleOperationId;
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LifecycleOperationListCursor {
     pub created_at: DateTime<Utc>,

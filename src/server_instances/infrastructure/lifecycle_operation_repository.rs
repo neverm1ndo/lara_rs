@@ -17,8 +17,8 @@ use crate::server_instances::{
     domain::{
         IdempotencyKey, LifecycleAction, LifecycleActorId, LifecycleExpectedState,
         LifecycleFailureCode, LifecycleOperation, LifecycleOperationEvidence, LifecycleOperationId,
-        LifecycleOperationState, LifecycleOperationVersion, ProcessState, ReadinessStatus,
-        RequestFingerprint, ServerInstanceId, SystemdJobReference,
+        LifecycleOperationState, LifecycleOperationVersion, ObservationStatus, ProcessState,
+        ReadinessStatus, RequestFingerprint, ServerInstanceId, SystemdJobReference,
     },
 };
 
@@ -271,6 +271,7 @@ enum ExpectedStateDocument {
 struct EvidenceDocument {
     process: ProcessStateDocument,
     readiness: ReadinessStatusDocument,
+    observation: ObservationStatusDocument,
     #[serde(default)]
     observed_at: Option<BsonDateTime>,
     #[serde(default)]
@@ -296,6 +297,14 @@ enum ReadinessStatusDocument {
     Unknown,
     NotReady,
     Ready,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum ObservationStatusDocument {
+    NotObserved,
+    Observed,
+    Stale,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -396,6 +405,7 @@ impl TryFrom<&LifecycleOperationEvidence> for EvidenceDocument {
         Ok(Self {
             process: value.process().into(),
             readiness: value.readiness().into(),
+            observation: value.observation().into(),
             observed_at: value.observed_at().map(to_bson_datetime),
             restart_count: value.restart_count().map(i64::from),
             invocation_id: value.invocation_id().map(str::to_owned),
@@ -410,6 +420,7 @@ impl TryFrom<EvidenceDocument> for LifecycleOperationEvidence {
         Ok(Self::new(
             value.process.into(),
             value.readiness.into(),
+            value.observation.into(),
             value.observed_at.map(from_bson_datetime).transpose()?,
             value
                 .restart_count
@@ -503,6 +514,26 @@ impl From<ReadinessStatusDocument> for ReadinessStatus {
             ReadinessStatusDocument::Unknown => Self::Unknown,
             ReadinessStatusDocument::NotReady => Self::NotReady,
             ReadinessStatusDocument::Ready => Self::Ready,
+        }
+    }
+}
+
+impl From<ObservationStatus> for ObservationStatusDocument {
+    fn from(value: ObservationStatus) -> Self {
+        match value {
+            ObservationStatus::NotObserved => Self::NotObserved,
+            ObservationStatus::Observed => Self::Observed,
+            ObservationStatus::Stale => Self::Stale,
+        }
+    }
+}
+
+impl From<ObservationStatusDocument> for ObservationStatus {
+    fn from(value: ObservationStatusDocument) -> Self {
+        match value {
+            ObservationStatusDocument::NotObserved => Self::NotObserved,
+            ObservationStatusDocument::Observed => Self::Observed,
+            ObservationStatusDocument::Stale => Self::Stale,
         }
     }
 }
@@ -626,6 +657,7 @@ mod tests {
             LifecycleOperationEvidence::new(
                 ProcessState::Inactive,
                 ReadinessStatus::NotReady,
+                ObservationStatus::Observed,
                 Some(created_at),
                 Some(1),
                 Some("old-invocation".into()),
