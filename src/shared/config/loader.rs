@@ -1545,7 +1545,11 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.game_server.instances.len(), 2);
         assert_eq!(config.game_server.instances[1].id, "dev-dm");
-        assert!(config.game_server.instances[1].systemd_observation);
+        assert_eq!(
+            config.game_server.instances[1].management,
+            Some(crate::shared::config::model::InstanceManagementConfig::Systemd)
+        );
+        assert_eq!(config.game_server.instances[1].systemd_observation, None);
         assert_eq!(
             config.backups.storage.directory,
             std::path::PathBuf::from("/var/lib/lara/backups")

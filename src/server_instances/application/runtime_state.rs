@@ -104,8 +104,8 @@ impl From<RuntimeStateRepositoryError> for GetRuntimeStateError {
 mod tests {
     use super::*;
     use crate::server_instances::domain::{
-        InstanceCapabilities, InstanceEnvironment, InstanceKind, InstanceObservability,
-        ObservationStatus, ServerInstance,
+        InstanceCapabilities, InstanceClassification, InstanceEnvironment, InstanceKind,
+        InstanceManagement, InstanceObservability, ObservationStatus, ServerInstance,
     };
 
     struct Registry(ServerInstance);
@@ -139,8 +139,11 @@ mod tests {
         let instance = ServerInstance::new(
             ServerInstanceId::new("main").unwrap(),
             "Main",
-            InstanceKind::Primary,
-            InstanceEnvironment::Production,
+            InstanceClassification::new(
+                InstanceKind::Primary,
+                InstanceEnvironment::Production,
+                InstanceManagement::External,
+            ),
             10,
             InstanceCapabilities::primary(),
             InstanceObservability::new(InstanceReadiness::Uds, true),

@@ -9,8 +9,8 @@ use crate::server_instances::{
     },
     application::runtime_state::RuntimeStateView,
     domain::{
-        InstanceEnvironment, InstanceKind, InstanceReadiness, ObservationStatus, ProcessState,
-        ReadinessStatus, TerminationEvidence, TerminationKind,
+        InstanceEnvironment, InstanceKind, InstanceManagement, InstanceReadiness,
+        ObservationStatus, ProcessState, ReadinessStatus, TerminationEvidence, TerminationKind,
     },
 };
 
@@ -31,6 +31,7 @@ pub struct ManifestInstanceResponse {
     pub display_name: String,
     pub kind: InstanceKindResponse,
     pub environment: InstanceEnvironmentResponse,
+    pub management: InstanceManagementResponse,
     pub sort_order: u32,
     pub features: BTreeMap<String, FeatureAccessResponse>,
     pub observability: ManifestObservabilityResponse,
@@ -72,6 +73,13 @@ pub enum InstanceEnvironmentResponse {
     Production,
     Development,
     Testing,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum InstanceManagementResponse {
+    External,
+    Systemd,
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -191,6 +199,7 @@ impl From<ManifestInstance> for ManifestInstanceResponse {
             display_name: instance.display_name,
             kind: instance.kind.into(),
             environment: instance.environment.into(),
+            management: instance.management.into(),
             sort_order: instance.sort_order,
             features: instance
                 .features
@@ -247,6 +256,15 @@ impl From<InstanceEnvironment> for InstanceEnvironmentResponse {
             InstanceEnvironment::Production => Self::Production,
             InstanceEnvironment::Development => Self::Development,
             InstanceEnvironment::Testing => Self::Testing,
+        }
+    }
+}
+
+impl From<InstanceManagement> for InstanceManagementResponse {
+    fn from(management: InstanceManagement) -> Self {
+        match management {
+            InstanceManagement::External => Self::External,
+            InstanceManagement::Systemd => Self::Systemd,
         }
     }
 }

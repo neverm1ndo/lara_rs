@@ -35,7 +35,9 @@ display_name = "Main server"
 kind = "primary"
 environment = "production"
 sort_order = 10
-systemd_unit = "lara-game@main.service"
+# External instances remain in the catalog but Lara does not observe or control
+# their process. This keeps the primary compatible with the legacy supervisor.
+management = "external"
 capabilities = [
     "overview",
     "lifecycle",
@@ -46,7 +48,6 @@ capabilities = [
 ]
 readiness = "uds"
 incident_tracking = true
-systemd_observation = false
 
 # Root of the primary managed SAMP/open.mp installation. Relative paths are resolved
 # from the server process working directory. Production deployments should

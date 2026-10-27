@@ -9,14 +9,14 @@ use crate::{
     server_instances::{
         application::registry::InstanceRegistry,
         domain::{
-            InstanceCapabilities, InstanceCapability, InstanceEnvironment, InstanceKind,
-            InstanceObservability, InstanceReadiness, InvalidServerInstance, ServerInstance,
-            ServerInstanceId,
+            InstanceCapabilities, InstanceCapability, InstanceClassification, InstanceEnvironment,
+            InstanceKind, InstanceManagement, InstanceObservability, InstanceReadiness,
+            InvalidServerInstance, ServerInstance, ServerInstanceId,
         },
     },
     shared::config::model::{
         GameServerConfig, InstanceCapabilityConfig, InstanceEnvironmentConfig, InstanceKindConfig,
-        InstanceReadinessConfig, ServerInstanceConfig,
+        InstanceManagementConfig, InstanceReadinessConfig, ServerInstanceConfig,
     },
 };
 
@@ -44,9 +44,8 @@ impl SystemdUnitName {
 #[derive(Debug, Clone)]
 pub struct ConfiguredServerInstance {
     descriptor: ServerInstance,
-    systemd_unit: SystemdUnitName,
+    systemd_unit: Option<SystemdUnitName>,
     storage_root: PathBuf,
-    systemd_observation: bool,
 }
 
 impl ConfiguredServerInstance {
@@ -54,16 +53,12 @@ impl ConfiguredServerInstance {
         &self.descriptor
     }
 
-    pub fn systemd_unit(&self) -> &SystemdUnitName {
-        &self.systemd_unit
+    pub fn systemd_unit(&self) -> Option<&SystemdUnitName> {
+        self.systemd_unit.as_ref()
     }
 
     pub fn storage_root(&self) -> &Path {
         &self.storage_root
-    }
-
-    pub const fn systemd_observation(&self) -> bool {
-        self.systemd_observation
     }
 }
 
@@ -91,10 +86,10 @@ impl ConfiguredInstanceRegistry {
             if instances.contains_key(&id) {
                 return Err(InstanceRegistryError::DuplicateIdentifier(id));
             }
-            if !units.insert(configured.systemd_unit.0.clone()) {
-                return Err(InstanceRegistryError::DuplicateSystemdUnit(
-                    configured.systemd_unit.0,
-                ));
+            if let Some(unit) = &configured.systemd_unit
+                && !units.insert(unit.0.clone())
+            {
+                return Err(InstanceRegistryError::DuplicateSystemdUnit(unit.0.clone()));
             }
             let normalized_root = normalize_path(&configured.storage_root)?;
             if let Some((other_id, _)) = roots
@@ -123,22 +118,6 @@ impl ConfiguredInstanceRegistry {
         if primary_count != 1 {
             return Err(InstanceRegistryError::PrimaryCount(primary_count));
         }
-        let observed: Vec<_> = instances
-            .values()
-            .filter(|instance| instance.systemd_observation)
-            .collect();
-        if observed.len() > 1 {
-            return Err(InstanceRegistryError::TooManyObservedInstances(
-                observed.len(),
-            ));
-        }
-        if observed
-            .first()
-            .is_some_and(|instance| instance.descriptor.kind() == InstanceKind::Primary)
-        {
-            return Err(InstanceRegistryError::PrimaryObservationNotAllowed);
-        }
-
         Ok(Self {
             primary_id,
             instances,
@@ -149,10 +128,10 @@ impl ConfiguredInstanceRegistry {
         self.instances.get(id)
     }
 
-    pub fn observed(&self) -> impl Iterator<Item = &ConfiguredServerInstance> {
+    pub fn systemd_managed(&self) -> impl Iterator<Item = &ConfiguredServerInstance> {
         self.instances
             .values()
-            .filter(|instance| instance.systemd_observation)
+            .filter(|instance| instance.descriptor.management() == InstanceManagement::Systemd)
     }
 }
 
@@ -189,7 +168,8 @@ fn legacy_primary(config: &GameServerConfig) -> ServerInstanceConfig {
         kind: InstanceKindConfig::Primary,
         environment: InstanceEnvironmentConfig::Production,
         sort_order: 10,
-        systemd_unit: format!("lara-game@{}.service", config.primary_instance),
+        management: Some(InstanceManagementConfig::External),
+        systemd_unit: None,
         storage_root: None,
         capabilities: vec![
             InstanceCapabilityConfig::Overview,
@@ -201,7 +181,7 @@ fn legacy_primary(config: &GameServerConfig) -> ServerInstanceConfig {
         ],
         readiness: Some(InstanceReadinessConfig::Uds),
         incident_tracking: true,
-        systemd_observation: false,
+        systemd_observation: None,
     }
 }
 
@@ -209,7 +189,7 @@ fn configured_instance(
     registration: ServerInstanceConfig,
     config: &GameServerConfig,
 ) -> Result<ConfiguredServerInstance, InstanceRegistryError> {
-    let id = ServerInstanceId::new(registration.id)?;
+    let id = ServerInstanceId::new(registration.id.clone())?;
     let kind = match registration.kind {
         InstanceKindConfig::Primary => InstanceKind::Primary,
         InstanceKindConfig::Auxiliary => InstanceKind::Auxiliary,
@@ -219,6 +199,8 @@ fn configured_instance(
         InstanceEnvironmentConfig::Development => InstanceEnvironment::Development,
         InstanceEnvironmentConfig::Testing => InstanceEnvironment::Testing,
     };
+    let management = resolve_management(&registration)?;
+    let systemd_unit = resolve_systemd_unit(&registration, management)?;
     let readiness = match registration.readiness.unwrap_or(match kind {
         InstanceKind::Primary => InstanceReadinessConfig::Uds,
         InstanceKind::Auxiliary => InstanceReadinessConfig::Process,
@@ -257,8 +239,7 @@ fn configured_instance(
     let descriptor = ServerInstance::new(
         id,
         registration.display_name,
-        kind,
-        environment,
+        InstanceClassification::new(kind, environment, management),
         registration.sort_order,
         capabilities,
         InstanceObservability::new(readiness, registration.incident_tracking),
@@ -266,10 +247,57 @@ fn configured_instance(
 
     Ok(ConfiguredServerInstance {
         descriptor,
-        systemd_unit: SystemdUnitName::new(registration.systemd_unit)?,
+        systemd_unit,
         storage_root,
-        systemd_observation: registration.systemd_observation,
     })
+}
+
+fn resolve_management(
+    registration: &ServerInstanceConfig,
+) -> Result<InstanceManagement, InstanceRegistryError> {
+    match (registration.management, registration.systemd_observation) {
+        (Some(_), Some(_)) => Err(InstanceRegistryError::ConflictingManagementConfiguration(
+            ServerInstanceId::new(registration.id.clone())?,
+        )),
+        (Some(InstanceManagementConfig::External), None) => Ok(InstanceManagement::External),
+        (Some(InstanceManagementConfig::Systemd), None) => Ok(InstanceManagement::Systemd),
+        (None, Some(true)) => {
+            tracing::warn!(
+                instance_id = %registration.id,
+                "systemd_observation is deprecated; use management = \"systemd\""
+            );
+            Ok(InstanceManagement::Systemd)
+        }
+        (None, Some(false)) | (None, None) => {
+            if registration.systemd_observation.is_some() {
+                tracing::warn!(
+                    instance_id = %registration.id,
+                    "systemd_observation is deprecated; use management = \"external\""
+                );
+            }
+            Ok(InstanceManagement::External)
+        }
+    }
+}
+
+fn resolve_systemd_unit(
+    registration: &ServerInstanceConfig,
+    management: InstanceManagement,
+) -> Result<Option<SystemdUnitName>, InstanceRegistryError> {
+    match (management, registration.systemd_unit.as_deref()) {
+        (InstanceManagement::Systemd, Some(unit)) if !unit.is_empty() => {
+            Ok(Some(SystemdUnitName::new(unit)?))
+        }
+        (InstanceManagement::Systemd, _) => Err(InstanceRegistryError::MissingSystemdUnit(
+            ServerInstanceId::new(registration.id.clone())?,
+        )),
+        (InstanceManagement::External, Some(_)) if registration.management.is_some() => {
+            Err(InstanceRegistryError::UnexpectedSystemdUnit(
+                ServerInstanceId::new(registration.id.clone())?,
+            ))
+        }
+        (InstanceManagement::External, _) => Ok(None),
+    }
 }
 
 fn normalize_path(path: &Path) -> Result<PathBuf, InstanceRegistryError> {
@@ -318,6 +346,14 @@ pub enum InstanceRegistryError {
     DuplicateSystemdUnit(String),
     #[error("invalid systemd service unit `{0}`")]
     InvalidSystemdUnit(String),
+    #[error("systemd-managed server instance `{0}` requires a systemd unit")]
+    MissingSystemdUnit(ServerInstanceId),
+    #[error("external server instance `{0}` must not declare a systemd unit")]
+    UnexpectedSystemdUnit(ServerInstanceId),
+    #[error(
+        "server instance `{0}` cannot declare both management and deprecated systemd_observation"
+    )]
+    ConflictingManagementConfiguration(ServerInstanceId),
     #[error("server instance `{instance}` declares capability `{capability}` more than once")]
     DuplicateCapability {
         instance: ServerInstanceId,
@@ -329,10 +365,6 @@ pub enum InstanceRegistryError {
     PrimaryKind(ServerInstanceId),
     #[error("server instance registry must contain exactly one primary; found {0}")]
     PrimaryCount(usize),
-    #[error("Release A permits at most one systemd-observed pilot; found {0}")]
-    TooManyObservedInstances(usize),
-    #[error("Release A does not permit automatic systemd observation of the primary instance")]
-    PrimaryObservationNotAllowed,
     #[error("auxiliary server instance `{0}` requires a storage root")]
     MissingStorageRoot(ServerInstanceId),
     #[error("server instance `{0}` has an empty storage root")]
@@ -371,7 +403,8 @@ mod tests {
             kind: InstanceKindConfig::Primary,
             environment: InstanceEnvironmentConfig::Production,
             sort_order: 10,
-            systemd_unit: "lara-game@main.service".into(),
+            management: Some(InstanceManagementConfig::External),
+            systemd_unit: None,
             storage_root: None,
             capabilities: vec![
                 InstanceCapabilityConfig::Overview,
@@ -383,7 +416,7 @@ mod tests {
             ],
             readiness: Some(InstanceReadinessConfig::Uds),
             incident_tracking: true,
-            systemd_observation: false,
+            systemd_observation: None,
         }
     }
 
@@ -394,7 +427,8 @@ mod tests {
             kind: InstanceKindConfig::Auxiliary,
             environment: InstanceEnvironmentConfig::Development,
             sort_order: 20,
-            systemd_unit: format!("lara-game@{id}.service"),
+            management: Some(InstanceManagementConfig::Systemd),
+            systemd_unit: Some(format!("lara-game@{id}.service")),
             storage_root: Some(root.into()),
             capabilities: vec![
                 InstanceCapabilityConfig::Overview,
@@ -404,7 +438,7 @@ mod tests {
             ],
             readiness: Some(InstanceReadinessConfig::Process),
             incident_tracking: true,
-            systemd_observation: false,
+            systemd_observation: None,
         }
     }
 
@@ -420,7 +454,12 @@ mod tests {
         assert_eq!(registry.list().len(), 2);
         let dev = ServerInstanceId::new("dev-dm").unwrap();
         assert_eq!(
-            registry.configured(&dev).unwrap().systemd_unit().as_str(),
+            registry
+                .configured(&dev)
+                .unwrap()
+                .systemd_unit()
+                .unwrap()
+                .as_str(),
             "lara-game@dev-dm.service"
         );
     }
@@ -449,9 +488,14 @@ mod tests {
         ));
 
         let mut duplicate_unit = auxiliary("dev-dm", "/srv/openmp/dev-dm");
-        duplicate_unit.systemd_unit = "lara-game@main.service".into();
+        let second = auxiliary("second", "/srv/openmp/second");
+        duplicate_unit.systemd_unit = second.systemd_unit.clone();
         assert!(matches!(
-            ConfiguredInstanceRegistry::from_config(&config(vec![primary(), duplicate_unit])),
+            ConfiguredInstanceRegistry::from_config(&config(vec![
+                primary(),
+                duplicate_unit,
+                second,
+            ])),
             Err(InstanceRegistryError::DuplicateSystemdUnit(_))
         ));
 
@@ -507,34 +551,53 @@ mod tests {
     }
 
     #[test]
-    fn release_a_allows_exactly_one_observed_auxiliary() {
-        let mut pilot = auxiliary("dev-dm", "/srv/openmp/dev-dm");
-        pilot.systemd_observation = true;
-        let registry =
-            ConfiguredInstanceRegistry::from_config(&config(vec![primary(), pilot])).unwrap();
+    fn release_b_observes_multiple_systemd_auxiliaries() {
+        let registry = ConfiguredInstanceRegistry::from_config(&config(vec![
+            primary(),
+            auxiliary("first", "/srv/openmp/first"),
+            auxiliary("second", "/srv/openmp/second"),
+        ]))
+        .unwrap();
 
-        let observed: Vec<_> = registry.observed().collect();
-        assert_eq!(observed.len(), 1);
-        assert_eq!(observed[0].descriptor().id().as_str(), "dev-dm");
-
-        let mut first = auxiliary("first", "/srv/openmp/first");
-        first.systemd_observation = true;
-        let mut second = auxiliary("second", "/srv/openmp/second");
-        second.systemd_observation = true;
-        assert!(matches!(
-            ConfiguredInstanceRegistry::from_config(&config(vec![primary(), first, second])),
-            Err(InstanceRegistryError::TooManyObservedInstances(2))
-        ));
+        let managed: Vec<_> = registry.systemd_managed().collect();
+        assert_eq!(managed.len(), 2);
+        assert_eq!(managed[0].descriptor().id().as_str(), "first");
+        assert_eq!(managed[1].descriptor().id().as_str(), "second");
     }
 
     #[test]
-    fn release_a_refuses_primary_systemd_observation() {
-        let mut primary = primary();
-        primary.systemd_observation = true;
+    fn accepts_release_a_observation_flag_as_compatibility_input() {
+        let mut pilot = auxiliary("dev-dm", "/srv/openmp/dev-dm");
+        pilot.management = None;
+        pilot.systemd_observation = Some(true);
+
+        let registry =
+            ConfiguredInstanceRegistry::from_config(&config(vec![primary(), pilot])).unwrap();
+        assert_eq!(registry.systemd_managed().count(), 1);
+    }
+
+    #[test]
+    fn rejects_ambiguous_or_incomplete_management_configuration() {
+        let mut conflicting = auxiliary("dev-dm", "/srv/openmp/dev-dm");
+        conflicting.systemd_observation = Some(true);
+        assert!(matches!(
+            ConfiguredInstanceRegistry::from_config(&config(vec![primary(), conflicting])),
+            Err(InstanceRegistryError::ConflictingManagementConfiguration(_))
+        ));
+
+        let mut missing_unit = auxiliary("missing", "/srv/openmp/missing");
+        missing_unit.systemd_unit = None;
+        assert!(matches!(
+            ConfiguredInstanceRegistry::from_config(&config(vec![primary(), missing_unit])),
+            Err(InstanceRegistryError::MissingSystemdUnit(_))
+        ));
+
+        let mut external_with_unit = auxiliary("external", "/srv/openmp/external");
+        external_with_unit.management = Some(InstanceManagementConfig::External);
 
         assert!(matches!(
-            ConfiguredInstanceRegistry::from_config(&config(vec![primary])),
-            Err(InstanceRegistryError::PrimaryObservationNotAllowed)
+            ConfiguredInstanceRegistry::from_config(&config(vec![primary(), external_with_unit])),
+            Err(InstanceRegistryError::UnexpectedSystemdUnit(_))
         ));
     }
 }

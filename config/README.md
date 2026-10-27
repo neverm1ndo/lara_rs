@@ -119,7 +119,7 @@ display_name = "Main server"
 kind = "primary"
 environment = "production"
 sort_order = 10
-systemd_unit = "lara-game@main.service"
+management = "external"
 capabilities = [
     "overview",
     "lifecycle",
@@ -130,7 +130,6 @@ capabilities = [
 ]
 readiness = "uds"
 incident_tracking = true
-systemd_observation = false
 
 [[game_server.instances]]
 id = "dev-dm"
@@ -138,6 +137,7 @@ display_name = "Developer DM"
 kind = "auxiliary"
 environment = "development"
 sort_order = 20
+management = "systemd"
 systemd_unit = "lara-game@dev-dm.service"
 storage_root = "/srv/openmp/dev-dm"
 capabilities = [
@@ -148,7 +148,6 @@ capabilities = [
 ]
 readiness = "process"
 incident_tracking = true
-systemd_observation = true
 
 [game_server.storage]
 root = "/srv/openmp/main"
@@ -280,24 +279,29 @@ Diff ограничивается `max_input_size_bytes` и
 обязателен.
 
 Идентификатор содержит только строчные ASCII-буквы, цифры и внутренние дефисы.
-Имена systemd units должны оканчиваться на `.service`. При запуске приложение
-отклоняет дубли идентификаторов и units, несколько primary, перекрывающиеся
-storage roots, отсутствие `lifecycle`, а также `maps` или `backups` у auxiliary.
+`management = "external"` регистрирует инстанс без наблюдения и управления
+процессом; `systemd_unit` для него не задаётся. `management = "systemd"`
+автоматически включает D-Bus observer и требует уникальный unit с суффиксом
+`.service`. В Release B systemd mode разрешён только auxiliary-инстансам.
+
+При запуске приложение отклоняет дубли идентификаторов и systemd units,
+несколько primary, перекрывающиеся storage roots, отсутствие `lifecycle`, а
+также `maps` или `backups` у auxiliary.
 
 Массив `game_server.instances` является атомарным значением TOML overlay: если
 production-файл объявляет auxiliary, в нём следует повторить и primary. Списки
 инстансов рекомендуется задавать в TOML через `LARA_CONFIG_FILE`, а не через
 переменные окружения.
 
-`systemd_observation = true` включает read-only D-Bus observer. В Release A
-разрешён ровно один такой пилотный auxiliary-инстанс; primary наблюдателем не
-затрагивается. По умолчанию флаг выключен, поэтому обновление Lara само по себе
-не начинает обращаться к systemd.
+Release A флаг `systemd_observation` временно читается для совместимости:
+`true` соответствует `management = "systemd"`, `false` —
+`management = "external"`. Его нельзя указывать одновременно с `management`;
+новые конфигурации не должны его использовать.
 
 Для совместимости конфигурация без `game_server.instances` создаёт implicit
-primary с ID из `game_server.primary_instance` (`main` по умолчанию), unit
-`lara-game@<id>.service`, полным набором capabilities и UDS readiness. Этот
-режим предназначен для миграции и не позволяет объявлять auxiliary.
+primary с ID из `game_server.primary_instance` (`main` по умолчанию), режимом
+`external`, полным набором capabilities и UDS readiness. Этот режим
+предназначен для миграции и не позволяет объявлять auxiliary.
 
 Шаблон systemd unit, read-only проверка пилота, порядок cutover и rollback
 находятся в [`deploy/systemd`](../deploy/systemd/README.md). Старый Node/bash

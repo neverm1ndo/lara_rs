@@ -132,12 +132,15 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let runtime_state_reader: Arc<dyn RuntimeStateReader> = runtime_states.clone();
     let runtime_state_writer: Arc<dyn RuntimeStateWriter> = runtime_states;
     let observation_targets: Vec<_> = instance_registry
-        .observed()
+        .systemd_managed()
         .map(|configured| {
             let descriptor = configured.descriptor();
             SystemdObservationTarget::new(
                 descriptor.id().clone(),
-                configured.systemd_unit().as_str(),
+                configured
+                    .systemd_unit()
+                    .expect("systemd-managed instances have a validated unit")
+                    .as_str(),
                 descriptor.observability().readiness(),
             )
         })

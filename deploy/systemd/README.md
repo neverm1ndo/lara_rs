@@ -147,7 +147,7 @@ display_name = "Main server"
 kind = "primary"
 environment = "production"
 sort_order = 10
-systemd_unit = "lara-game@main.service"
+management = "external"
 capabilities = [
     "overview",
     "lifecycle",
@@ -158,7 +158,6 @@ capabilities = [
 ]
 readiness = "uds"
 incident_tracking = true
-systemd_observation = false
 
 [[game_server.instances]]
 id = "dev-dm"
@@ -166,12 +165,12 @@ display_name = "Developer DM"
 kind = "auxiliary"
 environment = "development"
 sort_order = 20
+management = "systemd"
 systemd_unit = "lara-game@dev-dm.service"
 storage_root = "/srv/openmp/dev-dm"
 capabilities = ["overview", "lifecycle", "configuration", "incidents"]
 readiness = "process"
 incident_tracking = true
-systemd_observation = true
 ```
 
 После изменения overlay перезапустите Lara и проверьте Developer manifest.

@@ -4,8 +4,9 @@ mod runtime_state;
 
 pub use capabilities::{InstanceCapabilities, InstanceCapability};
 pub use instance::{
-    InstanceEnvironment, InstanceKind, InstanceObservability, InstanceReadiness,
-    InvalidServerInstance, ServerInstance, ServerInstanceId,
+    InstanceClassification, InstanceEnvironment, InstanceKind, InstanceManagement,
+    InstanceObservability, InstanceReadiness, InvalidServerInstance, ServerInstance,
+    ServerInstanceId,
 };
 pub use runtime_state::{
     InstanceRuntimeState, ObservationStatus, ProcessState, ReadinessStatus, TerminationEvidence,

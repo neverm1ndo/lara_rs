@@ -3,11 +3,12 @@ use utoipa::{Modify, OpenApi};
 
 use super::dto::{
     FeatureAccessResponse, FeaturePermissionResponse, InstanceEnvironmentResponse,
-    InstanceKindResponse, InstanceManifestResponse, InstanceReadinessResponse,
-    ManifestInstanceResponse, ManifestObservabilityResponse, ObservationStatusResponse,
-    ProcessStateResponse, ProcessStatusResponse, ReadinessStatusResponse,
-    RuntimeObservationResponse, RuntimeReadinessResponse, RuntimeStateResponse,
-    ServerInstanceErrorResponse, TerminationEvidenceResponse, TerminationKindResponse,
+    InstanceKindResponse, InstanceManagementResponse, InstanceManifestResponse,
+    InstanceReadinessResponse, ManifestInstanceResponse, ManifestObservabilityResponse,
+    ObservationStatusResponse, ProcessStateResponse, ProcessStatusResponse,
+    ReadinessStatusResponse, RuntimeObservationResponse, RuntimeReadinessResponse,
+    RuntimeStateResponse, ServerInstanceErrorResponse, TerminationEvidenceResponse,
+    TerminationKindResponse,
 };
 
 const BEARER_AUTH_SCHEME: &str = "bearerAuth";
@@ -22,6 +23,7 @@ const BEARER_AUTH_SCHEME: &str = "bearerAuth";
         ManifestObservabilityResponse,
         InstanceKindResponse,
         InstanceEnvironmentResponse,
+        InstanceManagementResponse,
         InstanceReadinessResponse,
         RuntimeStateResponse,
         ProcessStateResponse,
