@@ -10,11 +10,17 @@ if ! getent group lara >/dev/null; then
 fi
 
 if ! getent passwd lara-game >/dev/null; then
-    adduser --system --ingroup lara-game --home /nonexistent \
+    # Pre-create the home so adduser does not warn during unattended package
+    # installation. Game data remains in the configured instance roots.
+    install -d -o root -g root -m 0755 /var/lib/lara-game
+    adduser --system --ingroup lara-game --home /var/lib/lara-game \
         --no-create-home --shell /usr/sbin/nologin lara-game
+    install -d -o lara-game -g lara-game -m 0750 /var/lib/lara-game
 fi
 
 if ! getent passwd lara >/dev/null; then
+    # The final ownership is applied below after the account exists.
+    install -d -o root -g root -m 0755 /var/lib/lara
     adduser --system --ingroup lara --home /var/lib/lara \
         --no-create-home --shell /usr/sbin/nologin lara
 fi

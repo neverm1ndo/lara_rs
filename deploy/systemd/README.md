@@ -16,10 +16,10 @@ Release artifact рассчитан на Debian 12 (`amd64`). Пакет уст�
 sudo apt install ./lara-rs_0.2.2-1_amd64.deb
 
 sudo install -o root -g lara -m 0640 \
-  /usr/share/doc/lara-rs/examples/lara.env.example \
+  /usr/share/lara-rs/examples/lara.env.example \
   /etc/lara/lara.env
 sudo install -o root -g lara -m 0640 \
-  /usr/share/doc/lara-rs/examples/production.toml.example \
+  /usr/share/lara-rs/examples/production.toml.example \
   /etc/lara/production.toml
 ```
 
@@ -84,9 +84,12 @@ Package upgrade сохраняет `/etc/lara` и `/var/lib/lara` и не уда
 
 ```sh
 getent group lara-game >/dev/null || sudo groupadd --system lara-game
+sudo install -d -o root -g root -m 0755 /var/lib/lara-game
 id -u lara-game >/dev/null 2>&1 || \
-  sudo useradd --system --gid lara-game --home-dir /nonexistent \
+  sudo useradd --system --gid lara-game --home-dir /var/lib/lara-game \
     --shell /usr/sbin/nologin lara-game
+sudo chown lara-game:lara-game /var/lib/lara-game
+sudo chmod 0750 /var/lib/lara-game
 
 # Debian-пакет уже устанавливает шаблон. При развёртывании напрямую из
 # исходников используйте вместо него:

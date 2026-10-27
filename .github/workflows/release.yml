@@ -95,9 +95,16 @@ jobs:
 
           grep -Fx 'usr/bin/lara-rs' /tmp/lara-package-files
           grep -Fx 'usr/share/lara-rs/config/default.toml' /tmp/lara-package-files
+          grep -Fx 'usr/share/lara-rs/examples/lara.env.example' /tmp/lara-package-files
+          grep -Fx 'usr/share/lara-rs/examples/game-instance.env.example' /tmp/lara-package-files
+          grep -Fx 'usr/share/lara-rs/examples/game-instance.override.conf.example' /tmp/lara-package-files
+          grep -Fx 'usr/share/lara-rs/examples/production.toml.example' /tmp/lara-package-files
           grep -Fx 'usr/lib/lara-rs/verify-pilot' /tmp/lara-package-files
-          grep -Fx 'usr/share/doc/lara-rs/examples/production.toml.example' /tmp/lara-package-files
           grep -Fx 'usr/share/doc/lara-rs/changelog.Debian.gz' /tmp/lara-package-files
+          if grep -Eq '^usr/share/doc/lara-rs/examples/' /tmp/lara-package-files; then
+            echo "operational examples must not be installed below /usr/share/doc" >&2
+            exit 1
+          fi
           grep -Eq '^(usr/)?lib/systemd/system/lara-rs\.service$' /tmp/lara-package-files
           grep -Eq '^(usr/)?lib/systemd/system/lara-game@\.service$' /tmp/lara-package-files
 
@@ -107,8 +114,15 @@ jobs:
           test -x /usr/lib/lara-rs/verify-pilot
           getent passwd lara
           getent passwd lara-game
+          test "$(getent passwd lara | cut -d: -f6)" = "/var/lib/lara"
+          test "$(getent passwd lara-game | cut -d: -f6)" = "/var/lib/lara-game"
           test "$(stat -c '%U:%G:%a' /etc/lara)" = "root:lara:750"
           test "$(stat -c '%U:%G:%a' /var/lib/lara)" = "lara:lara:750"
+          test "$(stat -c '%U:%G:%a' /var/lib/lara-game)" = "lara-game:lara-game:750"
+          test -r /usr/share/lara-rs/examples/lara.env.example
+          test -r /usr/share/lara-rs/examples/game-instance.env.example
+          test -r /usr/share/lara-rs/examples/game-instance.override.conf.example
+          test -r /usr/share/lara-rs/examples/production.toml.example
           systemd-analyze verify /lib/systemd/system/lara-rs.service
 
           install -d -o lara-game -g lara-game -m 0770 /srv/openmp/package-check

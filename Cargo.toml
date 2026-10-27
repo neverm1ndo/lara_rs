@@ -13,7 +13,7 @@ license-file = ["LICENSE.md", "4"]
 extended-description = """\
 Lara is the authenticated control plane for open.mp game servers. \
 This package installs the API daemon, systemd units, configuration examples, \
-and the Release A pilot verification utility.\
+and the game-instance verification utility.\
 """
 section = "admin"
 priority = "optional"
@@ -23,10 +23,10 @@ changelog = "debian/changelog"
 assets = [
     ["target/release/lara-rs", "usr/bin/", "755"],
     ["config/default.toml", "usr/share/lara-rs/config/default.toml", "644"],
-    [".env.example", "usr/share/doc/lara-rs/examples/lara.env.example", "644"],
-    ["deploy/systemd/instance.env.example", "usr/share/doc/lara-rs/examples/game-instance.env.example", "644"],
-    ["deploy/systemd/override.conf.example", "usr/share/doc/lara-rs/examples/game-instance.override.conf.example", "644"],
-    ["deploy/systemd/production.toml.example", "usr/share/doc/lara-rs/examples/production.toml.example", "644"],
+    [".env.example", "usr/share/lara-rs/examples/lara.env.example", "644"],
+    ["deploy/systemd/instance.env.example", "usr/share/lara-rs/examples/game-instance.env.example", "644"],
+    ["deploy/systemd/override.conf.example", "usr/share/lara-rs/examples/game-instance.override.conf.example", "644"],
+    ["deploy/systemd/production.toml.example", "usr/share/lara-rs/examples/production.toml.example", "644"],
     ["deploy/systemd/README.md", "usr/share/doc/lara-rs/systemd-pilot.md", "644"],
     ["deploy/systemd/verify-pilot.sh", "usr/lib/lara-rs/verify-pilot", "755"],
     ["deploy/systemd/lara-game@.service", "usr/lib/systemd/system/lara-game@.service", "644"],
