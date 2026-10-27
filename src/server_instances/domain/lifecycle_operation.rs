@@ -103,9 +103,15 @@ pub struct SystemdJobReference(String);
 impl SystemdJobReference {
     pub fn new(value: impl Into<String>) -> Result<Self, InvalidLifecycleOperation> {
         let value = value.into();
-        let valid = value.starts_with('/')
+        let valid = value.len() > 1
             && value.len() <= MAX_JOB_REFERENCE_BYTES
-            && value.bytes().all(|byte| byte.is_ascii_graphic());
+            && value.starts_with('/')
+            && value.split('/').skip(1).all(|segment| {
+                !segment.is_empty()
+                    && segment
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+            });
         valid
             .then_some(Self(value))
             .ok_or(InvalidLifecycleOperation::SystemdJobReference)
@@ -634,5 +640,6 @@ mod tests {
         assert!(IdempotencyKey::new("x".repeat(129)).is_err());
         assert!(RequestFingerprint::new("A".repeat(64)).is_err());
         assert!(SystemdJobReference::new("org/systemd/job/1").is_err());
+        assert!(SystemdJobReference::new("/org/systemd/job/not-valid").is_err());
     }
 }
