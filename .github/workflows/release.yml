@@ -93,6 +93,7 @@ jobs:
             | tar -tf - \
             | sed 's#^\./##' > /tmp/lara-package-files
 
+          grep -Fx 'usr/bin/lara' /tmp/lara-package-files
           grep -Fx 'usr/bin/lara-rs' /tmp/lara-package-files
           grep -Fx 'usr/share/lara-rs/config/default.toml' /tmp/lara-package-files
           grep -Fx 'usr/share/lara-rs/examples/lara.env.example' /tmp/lara-package-files
@@ -110,7 +111,12 @@ jobs:
 
           lintian --fail-on error "$package"
           apt-get install -y "./$package"
-          test -x /usr/bin/lara-rs
+          test -x /usr/bin/lara
+          test -L /usr/bin/lara-rs
+          test "$(readlink /usr/bin/lara-rs)" = "lara"
+          /usr/bin/lara --version
+          /usr/bin/lara --help
+          /usr/bin/lara-rs --version
           test -x /usr/lib/lara-rs/verify-pilot
           getent passwd lara
           getent passwd lara-game

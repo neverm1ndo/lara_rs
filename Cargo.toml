@@ -2,6 +2,7 @@
 name = "lara-rs"
 version = "0.2.2"
 edition = "2024"
+autobins = false
 authors = ["neverm1ndo <it@nmnd.ru>"]
 license = "MIT"
 description = "Liberty Admin Realtime Analytics"
@@ -21,7 +22,8 @@ depends = "$auto, adduser, systemd"
 maintainer-scripts = "debian"
 changelog = "debian/changelog"
 assets = [
-    ["target/release/lara-rs", "usr/bin/", "755"],
+    ["target/release/lara", "usr/bin/lara", "755"],
+    { dest = "lara", link_name = "usr/bin/lara-rs" },
     ["config/default.toml", "usr/share/lara-rs/config/default.toml", "644"],
     [".env.example", "usr/share/lara-rs/examples/lara.env.example", "644"],
     ["deploy/systemd/instance.env.example", "usr/share/lara-rs/examples/game-instance.env.example", "644"],
@@ -35,6 +37,10 @@ systemd-units = [
     { unit-name = "lara-rs", unit-scripts = "deploy/systemd", enable = false, start = false },
 ]
 
+[[bin]]
+name = "lara"
+path = "src/main.rs"
+
 [dependencies]
 aes-gcm = "0.10.3"
 argon2 = { version = "0.5.3", features = ["std"] }
@@ -42,6 +48,7 @@ async-compression = { version = "0.4.50", features = ["gzip", "tokio"] }
 axum = { version = "0.8.9", features = ["multipart"] }
 base64 = "0.22.1"
 chrono = "0.4.45"
+clap = { version = "4.6.7", features = ["derive"] }
 config = { version = "0.15.27", default-features = false, features = ["toml"] }
 dotenvy = "0.15.7"
 diff-match-patch-rs = "0.5.1"

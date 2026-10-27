@@ -12,6 +12,10 @@ Release artifact рассчитан на Debian 12 (`amd64`). Пакет уст�
 автоматически: сначала администратор должен добавить production-конфигурацию и
 секреты.
 
+Канонический executable — `/usr/bin/lara`; systemd запускает `lara serve`.
+`/usr/bin/lara-rs` временно сохраняется как совместимый alias. Запуск `lara`
+без подкоманды показывает справку и не запускает daemon.
+
 ```sh
 sudo apt install ./lara-rs_0.2.2-1_amd64.deb
 
