@@ -195,6 +195,44 @@ impl LifecycleOperationService {
         Ok(LifecycleReconciliationResult { operation, changed })
     }
 
+    /// Recovers the single active operation for a trusted managed instance.
+    /// `Requested` is safe to dispatch because the state was persisted before
+    /// any runtime side effect. `Dispatching` is never dispatched again: it is
+    /// completed only from observer evidence or by its deadline.
+    pub async fn recover_active(
+        &self,
+        instance_id: &ServerInstanceId,
+    ) -> Result<Option<LifecycleOperation>, LifecycleOperationServiceError> {
+        let instance = self
+            .registry
+            .get(instance_id)
+            .ok_or(LifecycleOperationServiceError::InstanceNotFound)?;
+        if instance.management() != InstanceManagement::Systemd {
+            return Err(LifecycleOperationServiceError::InstanceNotManaged);
+        }
+        let Some(operation) = self
+            .operations
+            .find_active_for_instance(instance_id)
+            .await?
+        else {
+            return Ok(None);
+        };
+        if operation.state() == &LifecycleOperationState::Requested {
+            let fingerprint = operation.request_fingerprint().clone();
+            return self
+                .resume_or_replay(
+                    operation,
+                    &fingerprint,
+                    LifecycleCommandDisposition::Replayed,
+                )
+                .await
+                .map(|result| Some(result.operation));
+        }
+        self.reconcile(operation.id())
+            .await
+            .map(|result| Some(result.operation))
+    }
+
     async fn resolve_insert_conflict(
         &self,
         actor_id: LifecycleActorId,
@@ -240,8 +278,20 @@ impl LifecycleOperationService {
             });
         }
 
+        let now = self.clock.now();
+        if now >= operation.deadline() {
+            let expected_version = operation.version();
+            let evidence = self.read_evidence(operation.instance_id())?;
+            operation.time_out(Some(evidence), now)?;
+            self.operations.save(&operation, expected_version).await?;
+            return Ok(LifecycleCommandResult {
+                operation,
+                disposition,
+            });
+        }
+
         let expected_version = operation.version();
-        operation.begin_dispatch(self.clock.now())?;
+        operation.begin_dispatch(now)?;
         match self.operations.save(&operation, expected_version).await {
             Ok(()) => {}
             Err(LifecycleOperationRepositoryError::ConcurrentModification) => {
@@ -991,6 +1041,46 @@ mod tests {
             LifecycleOperationState::WaitingForState { .. }
         ));
         assert_eq!(fixture.runtime.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn expired_requested_operation_is_timed_out_without_dispatch() {
+        let fixture = fixture(successful_job());
+        let actor = subject(UserRole::Developer, 42);
+        let command = command(LifecycleAction::Start, "request-1");
+        let at = fixture.clock.now();
+        let requested = LifecycleOperation::request(
+            LifecycleOperationId::new(),
+            command.instance_id.clone(),
+            command.action,
+            actor.actor_id,
+            actor.display_name.clone(),
+            command.idempotency_key.clone(),
+            request_fingerprint(&command.instance_id, command.action),
+            LifecycleOperationEvidence::new(
+                ProcessState::Active,
+                ReadinessStatus::Ready,
+                ObservationStatus::Observed,
+                Some(at),
+                Some(0),
+                Some("invocation-before".into()),
+            ),
+            at,
+            at + ChronoDuration::seconds(30),
+        )
+        .unwrap();
+        fixture.operations.insert(&requested).await.unwrap();
+        *fixture.clock.0.lock().unwrap() = requested.deadline();
+
+        let recovered = fixture
+            .service
+            .recover_active(&command.instance_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(recovered.state(), &LifecycleOperationState::TimedOut);
+        assert_eq!(fixture.runtime.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

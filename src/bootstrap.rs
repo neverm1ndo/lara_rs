@@ -64,6 +64,7 @@ use crate::{
     server_instances::{
         self,
         application::{
+            lifecycle_reconciliation::LifecycleReconciler,
             lifecycle_service::LifecycleOperationService,
             registry::InstanceRegistry,
             runtime_state::{RuntimeStateReader, RuntimeStateWriter},
@@ -74,6 +75,7 @@ use crate::{
             lifecycle_operation_support::{
                 SystemLifecycleOperationClock, UuidLifecycleOperationIdGenerator,
             },
+            lifecycle_reconciliation_worker::LifecycleReconciliationWorker,
             runtime_state_store::InMemoryRuntimeStateStore,
             systemd_observer::{SystemdObservationTarget, SystemdObserverWorker},
             systemd_runtime::SystemdLifecycleRuntime,
@@ -103,6 +105,7 @@ use crate::{
 type BootstrapError = Box<dyn Error + Send + Sync>;
 const CURRENT_MFA_ENCRYPTION_KEY_VERSION: u32 = 1;
 const LIFECYCLE_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
+const LIFECYCLE_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(1);
 
 pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let bind_address = config.server.bind_address;
@@ -110,6 +113,9 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let maintenance = tokio::spawn(application.maintenance_worker.run(shutdown_rx.clone()));
+    let lifecycle_reconciliation = application
+        .lifecycle_reconciliation
+        .map(|worker| tokio::spawn(worker.run(shutdown_rx.clone())));
     let systemd_observer = application
         .systemd_observer
         .map(|worker| tokio::spawn(worker.run(shutdown_rx)));
@@ -123,6 +129,9 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     if let Some(observer) = systemd_observer {
         observer.await?;
     }
+    if let Some(reconciliation) = lifecycle_reconciliation {
+        reconciliation.await?;
+    }
     server_result?;
     Ok(())
 }
@@ -131,6 +140,7 @@ struct BuiltApplication {
     router: Router,
     maintenance_worker: BackupMaintenanceWorker,
     systemd_observer: Option<SystemdObserverWorker>,
+    lifecycle_reconciliation: Option<LifecycleReconciliationWorker>,
 }
 
 async fn build_application(config: AppConfig) -> Result<BuiltApplication, BootstrapError> {
@@ -209,6 +219,20 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         Arc::new(UuidLifecycleOperationIdGenerator),
         LIFECYCLE_OPERATION_TIMEOUT,
     )?);
+    let reconciliation_ids: Vec<_> = instance_registry
+        .systemd_managed()
+        .map(|configured| configured.descriptor().id().clone())
+        .collect();
+    let lifecycle_reconciliation = if reconciliation_ids.is_empty() {
+        None
+    } else {
+        let reconciler: Arc<dyn LifecycleReconciler> = lifecycle_operation_service.clone();
+        Some(LifecycleReconciliationWorker::new(
+            reconciliation_ids,
+            reconciler,
+            LIFECYCLE_RECONCILIATION_INTERVAL,
+        )?)
+    };
 
     let totp_secret_generator: Arc<dyn TotpSecretGenerator> = Arc::new(OsTotpSecretGenerator);
     let totp_cipher: Arc<dyn TotpSecretCipher> = Arc::new(Aes256GcmTotpSecretCipher::from_hex(
@@ -390,6 +414,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         router: router.merge(auth::presentation::openapi_router(openapi)),
         maintenance_worker,
         systemd_observer,
+        lifecycle_reconciliation,
     })
 }
 
