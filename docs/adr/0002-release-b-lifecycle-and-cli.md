@@ -207,6 +207,21 @@ Requested
 исходную операцию. Использование ключа с другим payload возвращает `409`.
 Несовместимые активные операции над одним инстансом сериализуются.
 
+MongoDB хранит канонические записи в коллекции
+`server_instance_operations`. Repository использует optimistic locking по
+полю `version` и создаёт следующие индексы:
+
+- unique `(actor_id, idempotency_key)` для повторяемости запроса;
+- partial unique `active_instance_id` для единственной non-terminal операции
+  на инстанс; у terminal-записей поле отсутствует;
+- `(instance_id, created_at desc, _id desc)` для стабильной HTTP-истории;
+- `(active_instance_id, deadline)` для последующей reconciliation.
+
+Если вставка конфликтует с одним из unique indexes, application service
+повторно читает запись по idempotency key: совпадающий fingerprint означает
+повтор исходного запроса, отличающийся fingerprint — `409`, а отсутствие такой
+записи означает конфликт с уже активной операцией инстанса.
+
 ### Runtime port и systemd D-Bus
 
 Application layer определяет runtime port для `start`, `stop` и `restart`.

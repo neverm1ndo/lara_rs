@@ -69,6 +69,7 @@ use crate::{
         },
         infrastructure::{
             config_registry::ConfiguredInstanceRegistry,
+            lifecycle_operation_repository::MongoLifecycleOperationRepository,
             runtime_state_store::InMemoryRuntimeStateStore,
             systemd_observer::{SystemdObservationTarget, SystemdObserverWorker},
         },
@@ -182,6 +183,9 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     mfa_challenge_repository.ensure_indexes().await?;
     let mfa_factors: Arc<dyn MfaFactorRepository> = Arc::new(mfa_factor_repository);
     let mfa_challenges: Arc<dyn MfaChallengeRepository> = Arc::new(mfa_challenge_repository);
+
+    let lifecycle_operations = MongoLifecycleOperationRepository::new(mongo_database.clone());
+    lifecycle_operations.ensure_indexes().await?;
 
     let totp_secret_generator: Arc<dyn TotpSecretGenerator> = Arc::new(OsTotpSecretGenerator);
     let totp_cipher: Arc<dyn TotpSecretCipher> = Arc::new(Aes256GcmTotpSecretCipher::from_hex(
