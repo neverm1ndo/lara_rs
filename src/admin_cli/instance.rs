@@ -15,7 +15,7 @@ use crate::{
     cli::{
         InstanceAddArgs, InstanceCapabilityArg, InstanceCommand, InstanceConfigArgs,
         InstanceEditArgs, InstanceEnvironmentArg, InstanceListArgs, InstanceRemoveArgs,
-        InstanceRenderSystemdArgs, OutputFormat,
+        InstanceRenderSystemdArgs, InstanceVerifyArgs, OutputFormat,
     },
     server_instances::{
         application::registry::InstanceRegistry,
@@ -25,6 +25,7 @@ use crate::{
         },
         infrastructure::{
             config_registry::{ConfiguredInstanceRegistry, InstanceRegistryError},
+            systemd_inspector::{EffectiveSystemdUnit, inspect_systemd_unit},
             systemd_runtime::{SystemdReloadError, reload_systemd_manager},
         },
     },
@@ -38,6 +39,7 @@ pub async fn execute(command: InstanceCommand) -> Result<(), InstanceCliError> {
         InstanceCommand::Edit(args) => edit(args),
         InstanceCommand::Remove(args) => remove(args),
         InstanceCommand::RenderSystemd(args) => render_systemd(args).await,
+        InstanceCommand::Verify(args) => verify(args).await,
     }
 }
 
@@ -347,6 +349,385 @@ async fn render_systemd(args: InstanceRenderSystemdArgs) -> Result<(), InstanceC
     }
     print_result(args.config.output, &result, human)?;
     Ok(())
+}
+
+async fn verify(args: InstanceVerifyArgs) -> Result<(), InstanceCliError> {
+    let loaded = LoadedRegistry::read(&args.config)?;
+    let descriptor = loaded
+        .registry
+        .list()
+        .into_iter()
+        .find(|instance| instance.id().as_str() == args.id)
+        .ok_or_else(|| InstanceCliError::NotFound(args.id.clone()))?;
+    if descriptor.kind() != InstanceKind::Auxiliary
+        || descriptor.management() != InstanceManagement::Systemd
+    {
+        return Err(InstanceCliError::NotSystemdManaged(args.id));
+    }
+    let configured = loaded
+        .registry
+        .configured(descriptor.id())
+        .ok_or_else(|| InstanceCliError::NotFound(descriptor.id().to_string()))?;
+    let systemd_unit = configured
+        .systemd_unit()
+        .ok_or_else(|| InstanceCliError::NotSystemdManaged(descriptor.id().to_string()))?
+        .as_str()
+        .to_owned();
+    let storage_root = configured.storage_root().to_path_buf();
+    let executable = args
+        .executable
+        .clone()
+        .unwrap_or_else(|| storage_root.join("omp-server"));
+    validate_render_paths(
+        &storage_root,
+        &executable,
+        &args.systemd_directory,
+        &args.instance_environment_directory,
+    )?;
+
+    let drop_in_file = args
+        .systemd_directory
+        .join(format!("{systemd_unit}.d"))
+        .join("override.conf");
+    let environment_file = args
+        .instance_environment_directory
+        .join(format!("{}.env", descriptor.id()));
+    let needs_home_access = path_requires_home_access(&storage_root);
+    let expected_drop_in = render_drop_in(
+        &storage_root,
+        &executable,
+        &environment_file,
+        &args.user,
+        &args.group,
+        needs_home_access,
+    )?;
+
+    let mut checks = vec![VerificationCheck::passed(
+        "registry",
+        "instance is a validated systemd-managed auxiliary",
+        Some(systemd_unit.clone()),
+    )];
+    checks.push(check_result(
+        "unix-user",
+        format!("Unix user `{}` exists", args.user),
+        validate_identity(&args.user, IdentityKind::User),
+    ));
+    checks.push(check_result(
+        "unix-group",
+        format!("Unix group `{}` exists", args.group),
+        validate_identity(&args.group, IdentityKind::Group),
+    ));
+    checks.push(check_result(
+        "storage-and-executable",
+        "storage root and executable are safe",
+        validate_executable(&storage_root, &executable),
+    ));
+    checks.extend(check_drop_in(&drop_in_file, &expected_drop_in));
+    checks.push(check_environment_file(&environment_file, &args.group));
+
+    match inspect_systemd_unit(&systemd_unit).await {
+        Ok(effective) => checks.extend(check_effective_unit(
+            &effective,
+            &drop_in_file,
+            &storage_root,
+            &executable,
+            &args.user,
+            &args.group,
+            !needs_home_access,
+        )),
+        Err(error) => checks.push(VerificationCheck::failed(
+            "systemd-dbus",
+            "effective unit could not be inspected",
+            Some(error.to_string()),
+        )),
+    }
+
+    let failures = checks
+        .iter()
+        .filter(|check| check.status == VerificationStatus::Failed)
+        .count();
+    let warnings = checks
+        .iter()
+        .filter(|check| check.status == VerificationStatus::Warning)
+        .count();
+    let report = InstanceVerificationReport {
+        valid: failures == 0,
+        instance_id: descriptor.id().to_string(),
+        systemd_unit,
+        failures,
+        warnings,
+        checks,
+    };
+    let human = report
+        .checks
+        .iter()
+        .map(|check| {
+            let detail = check
+                .detail
+                .as_deref()
+                .map(|detail| format!(": {detail}"))
+                .unwrap_or_default();
+            format!(
+                "[{}] {} — {}{}",
+                check.status.label(),
+                check.id,
+                check.summary,
+                detail
+            )
+        })
+        .chain(std::iter::once(format!(
+            "result: {} ({} failures, {} warnings)",
+            if report.valid { "valid" } else { "invalid" },
+            report.failures,
+            report.warnings
+        )))
+        .collect::<Vec<_>>()
+        .join("\n");
+    print_result(args.config.output, &report, human)?;
+    if failures != 0 {
+        return Err(InstanceCliError::VerificationFailed { failures });
+    }
+    Ok(())
+}
+
+fn check_result(
+    id: &'static str,
+    summary: impl Into<String>,
+    result: Result<(), InstanceCliError>,
+) -> VerificationCheck {
+    match result {
+        Ok(()) => VerificationCheck::passed(id, summary, None),
+        Err(error) => VerificationCheck::failed(id, summary, Some(error.to_string())),
+    }
+}
+
+fn check_drop_in(path: &Path, expected: &str) -> Vec<VerificationCheck> {
+    let mut checks = Vec::new();
+    match fs::read_to_string(path) {
+        Ok(actual) => {
+            checks.push(if actual == expected {
+                VerificationCheck::passed(
+                    "drop-in-content",
+                    "drop-in matches the registry-derived definition",
+                    Some(path.display().to_string()),
+                )
+            } else {
+                VerificationCheck::failed(
+                    "drop-in-content",
+                    "drop-in differs from the registry-derived definition",
+                    Some(path.display().to_string()),
+                )
+            });
+            checks.push(check_drop_in_metadata(path));
+        }
+        Err(error) => checks.push(VerificationCheck::failed(
+            "drop-in-content",
+            "drop-in is not readable",
+            Some(format!("{}: {error}", path.display())),
+        )),
+    }
+    checks
+}
+
+fn check_drop_in_metadata(_path: &Path) -> VerificationCheck {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        return match fs::metadata(_path) {
+            Ok(metadata)
+                if metadata.is_file()
+                    && metadata.permissions().mode() & 0o777 == 0o644
+                    && metadata.uid() == 0 =>
+            {
+                VerificationCheck::passed(
+                    "drop-in-metadata",
+                    "drop-in is root-owned with mode 0644",
+                    None,
+                )
+            }
+            Ok(metadata) => VerificationCheck::failed(
+                "drop-in-metadata",
+                "drop-in must be a root-owned regular file with mode 0644",
+                Some(format!(
+                    "uid={}, mode={:04o}",
+                    metadata.uid(),
+                    metadata.permissions().mode() & 0o7777
+                )),
+            ),
+            Err(error) => VerificationCheck::failed(
+                "drop-in-metadata",
+                "drop-in metadata is unavailable",
+                Some(error.to_string()),
+            ),
+        };
+    }
+    #[cfg(not(unix))]
+    VerificationCheck::warning(
+        "drop-in-metadata",
+        "Unix ownership and mode checks are unavailable on this platform",
+        None,
+    )
+}
+
+fn check_environment_file(path: &Path, _group: &str) -> VerificationCheck {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_file() => {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::{MetadataExt, PermissionsExt};
+                let mode = metadata.permissions().mode() & 0o777;
+                let expected_gid = local_group_id(_group);
+                if mode != 0o640
+                    || metadata.uid() != 0
+                    || expected_gid.is_none_or(|gid| metadata.gid() != gid)
+                {
+                    return VerificationCheck::failed(
+                        "instance-environment",
+                        format!(
+                            "instance environment file must be owned by root:{_group} with mode 0640"
+                        ),
+                        Some(format!(
+                            "{} uid={}, gid={}, mode={mode:04o}",
+                            path.display(),
+                            metadata.uid(),
+                            metadata.gid()
+                        )),
+                    );
+                }
+            }
+            VerificationCheck::passed(
+                "instance-environment",
+                "optional instance environment file is a regular private file",
+                Some(path.display().to_string()),
+            )
+        }
+        Ok(_) => VerificationCheck::failed(
+            "instance-environment",
+            "instance environment path is not a regular file",
+            Some(path.display().to_string()),
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => VerificationCheck::warning(
+            "instance-environment",
+            "optional instance environment file is absent",
+            Some(path.display().to_string()),
+        ),
+        Err(error) => VerificationCheck::failed(
+            "instance-environment",
+            "instance environment file metadata is unavailable",
+            Some(error.to_string()),
+        ),
+    }
+}
+
+#[cfg(unix)]
+fn local_group_id(name: &str) -> Option<u32> {
+    fs::read_to_string("/etc/group")
+        .ok()?
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split(':');
+            (fields.next()? == name)
+                .then(|| fields.nth(1)?.parse().ok())
+                .flatten()
+        })
+}
+
+fn check_effective_unit(
+    effective: &EffectiveSystemdUnit,
+    drop_in_file: &Path,
+    storage_root: &Path,
+    executable: &Path,
+    user: &str,
+    group: &str,
+    protect_home: bool,
+) -> Vec<VerificationCheck> {
+    let expected_root = path_value(storage_root);
+    let expected_executable = path_value(executable);
+    let expected_drop_in = path_value(drop_in_file);
+    let expected_protect_home = if protect_home { "yes" } else { "no" };
+    let mut checks = Vec::new();
+    checks.push(compare_check(
+        "systemd-load-state",
+        "effective unit is loaded",
+        effective.load_state == "loaded" && !effective.fragment_path.is_empty(),
+        format!(
+            "loadState={}, fragment={}",
+            effective.load_state, effective.fragment_path
+        ),
+    ));
+    checks.push(compare_check(
+        "systemd-drop-in",
+        "systemd loaded the generated drop-in",
+        effective
+            .drop_in_paths
+            .iter()
+            .any(|path| path == &expected_drop_in),
+        format!("loaded drop-ins: {:?}", effective.drop_in_paths),
+    ));
+    checks.push(compare_check(
+        "systemd-working-directory",
+        "effective WorkingDirectory matches storage root",
+        effective.working_directory == expected_root,
+        format!("effective={}", effective.working_directory),
+    ));
+    checks.push(compare_check(
+        "systemd-identity",
+        "effective User and Group match",
+        effective.user == user && effective.group == group,
+        format!("effective={}:{}", effective.user, effective.group),
+    ));
+    checks.push(compare_check(
+        "systemd-exec-start",
+        "effective ExecStart contains exactly the expected executable",
+        effective.exec_start.len() == 1
+            && effective.exec_start[0].path == expected_executable
+            && effective.exec_start[0]
+                .arguments
+                .first()
+                .is_some_and(|argument| argument == &expected_executable),
+        format!(
+            "effective={:?}",
+            effective
+                .exec_start
+                .iter()
+                .map(|entry| (&entry.path, &entry.arguments))
+                .collect::<Vec<_>>()
+        ),
+    ));
+    checks.push(compare_check(
+        "systemd-protect-home",
+        "effective ProtectHome matches storage location",
+        effective.protect_home == expected_protect_home,
+        format!("effective={}", effective.protect_home),
+    ));
+    checks.push(compare_check(
+        "systemd-write-paths",
+        "effective writable paths are limited to the instance root",
+        effective.read_write_paths == [expected_root],
+        format!("effective={:?}", effective.read_write_paths),
+    ));
+    checks.push(VerificationCheck::passed(
+        "systemd-runtime-state",
+        "runtime state was read without lifecycle actions",
+        Some(format!(
+            "activeState={}, subState={}",
+            effective.active_state, effective.sub_state
+        )),
+    ));
+    checks
+}
+
+fn compare_check(
+    id: &'static str,
+    summary: &'static str,
+    matches: bool,
+    detail: String,
+) -> VerificationCheck {
+    if matches {
+        VerificationCheck::passed(id, summary, Some(detail))
+    } else {
+        VerificationCheck::failed(id, summary, Some(detail))
+    }
 }
 
 fn validate_render_paths(
@@ -876,6 +1257,72 @@ struct SystemdRenderResult {
     acl_guidance: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InstanceVerificationReport {
+    valid: bool,
+    instance_id: String,
+    systemd_unit: String,
+    failures: usize,
+    warnings: usize,
+    checks: Vec<VerificationCheck>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct VerificationCheck {
+    id: &'static str,
+    status: VerificationStatus,
+    summary: String,
+    detail: Option<String>,
+}
+
+impl VerificationCheck {
+    fn passed(id: &'static str, summary: impl Into<String>, detail: Option<String>) -> Self {
+        Self::new(id, VerificationStatus::Passed, summary, detail)
+    }
+
+    fn warning(id: &'static str, summary: impl Into<String>, detail: Option<String>) -> Self {
+        Self::new(id, VerificationStatus::Warning, summary, detail)
+    }
+
+    fn failed(id: &'static str, summary: impl Into<String>, detail: Option<String>) -> Self {
+        Self::new(id, VerificationStatus::Failed, summary, detail)
+    }
+
+    fn new(
+        id: &'static str,
+        status: VerificationStatus,
+        summary: impl Into<String>,
+        detail: Option<String>,
+    ) -> Self {
+        Self {
+            id,
+            status,
+            summary: summary.into(),
+            detail,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum VerificationStatus {
+    Passed,
+    Warning,
+    Failed,
+}
+
+impl VerificationStatus {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Passed => "PASS",
+            Self::Warning => "WARN",
+            Self::Failed => "FAIL",
+        }
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum InstanceCliError {
     #[error("instance `{0}` is already registered")]
@@ -935,6 +1382,8 @@ pub enum InstanceCliError {
         #[source]
         source: SystemdReloadError,
     },
+    #[error("instance verification failed with {failures} blocking check(s)")]
+    VerificationFailed { failures: usize },
     #[error(transparent)]
     Toml(#[from] toml_edit::TomlError),
 }
@@ -1095,5 +1544,57 @@ LARA_MONGODB__URI=mongodb://localhost:27017
             validate_identity("lara game", IdentityKind::User),
             Err(InstanceCliError::InvalidUnixIdentity(_))
         ));
+    }
+
+    #[test]
+    fn effective_unit_checks_detect_drift_without_changing_runtime() {
+        let mut effective = EffectiveSystemdUnit {
+            load_state: "loaded".into(),
+            active_state: "inactive".into(),
+            sub_state: "dead".into(),
+            fragment_path: "/usr/lib/systemd/system/lara-game@.service".into(),
+            drop_in_paths: vec![
+                "/etc/systemd/system/lara-game@test.service.d/override.conf".into(),
+            ],
+            user: "lara-game".into(),
+            group: "lara-game".into(),
+            working_directory: "/home/svr_test".into(),
+            exec_start: vec![
+                crate::server_instances::infrastructure::systemd_inspector::SystemdExecCommand {
+                    path: "/home/svr_test/omp-server".into(),
+                    arguments: vec!["/home/svr_test/omp-server".into()],
+                },
+            ],
+            protect_home: "no".into(),
+            read_write_paths: vec!["/home/svr_test".into()],
+        };
+        let checks = check_effective_unit(
+            &effective,
+            Path::new("/etc/systemd/system/lara-game@test.service.d/override.conf"),
+            Path::new("/home/svr_test"),
+            Path::new("/home/svr_test/omp-server"),
+            "lara-game",
+            "lara-game",
+            false,
+        );
+        assert!(
+            checks
+                .iter()
+                .all(|check| check.status == VerificationStatus::Passed)
+        );
+
+        effective.working_directory = "/tmp/wrong".into();
+        let checks = check_effective_unit(
+            &effective,
+            Path::new("/etc/systemd/system/lara-game@test.service.d/override.conf"),
+            Path::new("/home/svr_test"),
+            Path::new("/home/svr_test/omp-server"),
+            "lara-game",
+            "lara-game",
+            false,
+        );
+        assert!(checks.iter().any(|check| {
+            check.id == "systemd-working-directory" && check.status == VerificationStatus::Failed
+        }));
     }
 }

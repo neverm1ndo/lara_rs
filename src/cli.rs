@@ -45,6 +45,8 @@ pub enum InstanceCommand {
     Remove(InstanceRemoveArgs),
     /// Render the validated systemd drop-in for an auxiliary instance.
     RenderSystemd(InstanceRenderSystemdArgs),
+    /// Verify host files and the effective systemd definition without lifecycle actions.
+    Verify(InstanceVerifyArgs),
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -164,6 +166,29 @@ pub struct InstanceRenderSystemdArgs {
     /// Write files without asking systemd to reload its unit definitions.
     #[arg(long = "no-reload", action = ArgAction::SetFalse, default_value_t = true)]
     pub reload: bool,
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct InstanceVerifyArgs {
+    /// Stable identifier of a registered systemd-managed auxiliary instance.
+    pub id: String,
+    /// Absolute game-server executable; defaults to <storage-root>/omp-server.
+    #[arg(long)]
+    pub executable: Option<PathBuf>,
+    /// Expected Unix account used by the game-server process.
+    #[arg(long, default_value = "lara-game")]
+    pub user: String,
+    /// Expected Unix group used by the game-server process.
+    #[arg(long, default_value = "lara-game")]
+    pub group: String,
+    /// Root containing host systemd units and instance drop-ins.
+    #[arg(long, default_value = "/etc/systemd/system")]
+    pub systemd_directory: PathBuf,
+    /// Directory for optional per-instance process environment files.
+    #[arg(long, default_value = "/etc/lara/game-instances")]
+    pub instance_environment_directory: PathBuf,
     #[command(flatten)]
     pub config: InstanceConfigArgs,
 }
@@ -368,5 +393,20 @@ mod tests {
         assert!(args.dry_run);
         assert!(!args.reload);
         assert!(!args.yes);
+    }
+
+    #[test]
+    fn parses_read_only_instance_verification() {
+        let cli = Cli::try_parse_from(["lara", "instance", "verify", "test", "--output", "json"])
+            .unwrap();
+
+        let Command::Instance {
+            command: InstanceCommand::Verify(args),
+        } = cli.command
+        else {
+            panic!("expected instance verify command")
+        };
+        assert_eq!(args.id, "test");
+        assert_eq!(args.config.output, OutputFormat::Json);
     }
 }

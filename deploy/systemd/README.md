@@ -204,6 +204,22 @@ D-Bus; для подготовки offline image предусмотрен `--no-
 владельцев игровых ресурсов. Ожидаемый необязательный environment-файл и план
 ACL возвращаются в human/JSON output.
 
+До cutover выполните read-only сверку host и effective unit:
+
+```sh
+sudo lara instance verify dev-dm
+sudo lara instance verify dev-dm --output json
+```
+
+Проверяются регистрация, root и executable, Unix identity, точное содержимое и
+режим drop-in, приватность необязательного environment-файла, а также
+загруженные systemd свойства `WorkingDirectory`, `ExecStart`, `User`, `Group`,
+`ProtectHome` и `ReadWritePaths`. Текущее `inactive/dead` состояние до cutover
+допустимо и выводится как информация. Отсутствующий необязательный
+environment-файл даёт warning; drift, недоступный D-Bus или небезопасные права
+дают ненулевой exit code. Команда может загрузить метаданные unit в manager для
+чтения, но не ставит lifecycle job и не изменяет файлы.
+
 Эквивалентная ручная форма production overlay содержит как primary, так и
 auxiliary: массив `game_server.instances` заменяется целиком.
 
@@ -250,6 +266,7 @@ incident_tracking = true
 
 ## Acceptance checklist
 
+- `sudo lara instance verify dev-dm` завершается без blocking failures;
 - unit проходит `systemd-analyze verify`;
 - unit имеет состояния `active/running` и ненулевой `MainPID`;
 - `InvocationID` заполнен, `NRestarts` читается;
