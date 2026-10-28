@@ -35,6 +35,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             .await
             .map_err(Into::into),
         Command::Doctor(args) => admin_cli::doctor::execute(args).await.map_err(Into::into),
+        Command::Completions(args) => {
+            admin_cli::completions::execute(args);
+            Ok(())
+        }
     }
 }
 

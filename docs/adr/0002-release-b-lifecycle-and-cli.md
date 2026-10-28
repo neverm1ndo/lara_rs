@@ -206,6 +206,10 @@ code при блокирующей проблеме. Проверяются ка
 Human-readable вывод используется по умолчанию; `--output json` предоставляет
 стабильный контракт для автоматизации.
 
+`lara completions <shell>` строит completion-скрипт непосредственно из Clap
+command tree и пишет его в stdout. Поддерживаются Bash, Elvish, Fish,
+PowerShell и Zsh; отдельная вручную синхронизируемая CLI-схема не используется.
+
 Реализованный `doctor` агрегирует startup validation, registry, bounded-time
 MySQL/MongoDB ping, host storage, `instance verify` и `/proc` cgroup ownership.
 Проверки изолированы: недоступная база не скрывает drift другого инстанса.

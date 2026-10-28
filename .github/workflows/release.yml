@@ -117,6 +117,9 @@ jobs:
           test "$(readlink /usr/bin/lara-rs)" = "lara"
           /usr/bin/lara --version
           /usr/bin/lara --help
+          /usr/bin/lara completions bash > /tmp/lara.bash
+          grep -q 'doctor' /tmp/lara.bash
+          grep -q 'render-systemd' /tmp/lara.bash
           /usr/bin/lara-rs --version
           test -x /usr/lib/lara-rs/verify-pilot
           getent passwd lara

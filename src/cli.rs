@@ -33,6 +33,24 @@ pub enum Command {
     },
     /// Run read-only deployment diagnostics across configuration and dependencies.
     Doctor(DoctorArgs),
+    /// Generate shell completion scripts from the current CLI schema.
+    Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct CompletionsArgs {
+    /// Shell whose completion syntax should be generated.
+    #[arg(value_enum)]
+    pub shell: CompletionShell,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum CompletionShell {
+    Bash,
+    Elvish,
+    Fish,
+    PowerShell,
+    Zsh,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -364,7 +382,7 @@ mod tests {
                 .get_subcommands()
                 .map(clap::Command::get_name)
                 .collect::<Vec<_>>(),
-            ["serve", "config", "instance", "doctor"]
+            ["serve", "config", "instance", "doctor", "completions"]
         );
     }
 
@@ -466,5 +484,17 @@ mod tests {
         assert_eq!(args.instance.as_deref(), Some("test"));
         assert_eq!(args.database_timeout_seconds, 10);
         assert_eq!(args.output, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_completion_shell_as_an_explicit_value() {
+        let cli = Cli::try_parse_from(["lara", "completions", "zsh"]).unwrap();
+
+        assert_eq!(
+            cli.command,
+            Command::Completions(CompletionsArgs {
+                shell: CompletionShell::Zsh,
+            })
+        );
     }
 }

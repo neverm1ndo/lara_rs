@@ -17,6 +17,16 @@ Release artifact рассчитан на Debian 12 (`amd64`). Пакет уст�
 `/usr/bin/lara-rs` временно сохраняется как совместимый alias. Запуск `lara`
 без подкоманды показывает справку и не запускает daemon.
 
+Completion-скрипты генерируются из текущей CLI-схемы. Например, для Bash:
+
+```sh
+sudo install -d -o root -g root -m 0755 /usr/share/bash-completion/completions
+lara completions bash | sudo tee /usr/share/bash-completion/completions/lara >/dev/null
+```
+
+Поддерживаются `bash`, `elvish`, `fish`, `powershell` и `zsh`. Команда только
+пишет скрипт в stdout и не читает production-конфигурацию.
+
 ```sh
 sudo apt install ./lara-rs_0.2.2-1_amd64.deb
 
