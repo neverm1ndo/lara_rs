@@ -140,7 +140,16 @@ fn paths(args: ConfigPathsArgs) -> Result<(), ConfigCliError> {
 pub(super) fn atomic_write(
     path: &Path,
     contents: &[u8],
+    owner_source: &Path,
+) -> Result<(), ConfigCliError> {
+    atomic_write_with_mode(path, contents, owner_source, 0o640)
+}
+
+pub(super) fn atomic_write_with_mode(
+    path: &Path,
+    contents: &[u8],
     _owner_source: &Path,
+    _mode: u32,
 ) -> Result<(), ConfigCliError> {
     let file_name = path
         .file_name()
@@ -154,7 +163,7 @@ pub(super) fn atomic_write(
         OpenOptions::new()
             .create_new(true)
             .write(true)
-            .mode(0o640)
+            .mode(_mode)
             .open(&temporary)
     };
     #[cfg(not(unix))]
@@ -176,7 +185,7 @@ pub(super) fn atomic_write(
         let owner = fs::metadata(_owner_source).map_err(|error| {
             io_error("read configuration directory owner", _owner_source, error)
         })?;
-        fs::set_permissions(&temporary, fs::Permissions::from_mode(0o640))
+        fs::set_permissions(&temporary, fs::Permissions::from_mode(_mode))
             .map_err(|error| io_error("set configuration permissions", &temporary, error))?;
         chown(&temporary, Some(owner.uid()), Some(owner.gid()))
             .map_err(|error| io_error("set configuration owner", &temporary, error))?;

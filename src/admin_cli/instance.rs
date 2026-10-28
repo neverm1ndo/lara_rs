@@ -8,13 +8,14 @@ use thiserror::Error;
 use toml_edit::{Array, ArrayOfTables, DocumentMut, Item, Table, Value, value};
 
 use super::config::{
-    ConfigCliError, atomic_write, backup_path, io_error, print_result, sync_directory,
+    ConfigCliError, atomic_write, atomic_write_with_mode, backup_path, io_error, print_result,
+    sync_directory,
 };
 use crate::{
     cli::{
         InstanceAddArgs, InstanceCapabilityArg, InstanceCommand, InstanceConfigArgs,
         InstanceEditArgs, InstanceEnvironmentArg, InstanceListArgs, InstanceRemoveArgs,
-        OutputFormat,
+        InstanceRenderSystemdArgs, OutputFormat,
     },
     server_instances::{
         application::registry::InstanceRegistry,
@@ -22,17 +23,21 @@ use crate::{
             InstanceCapability, InstanceEnvironment, InstanceKind, InstanceManagement,
             InstanceReadiness, ServerInstance,
         },
-        infrastructure::config_registry::{ConfiguredInstanceRegistry, InstanceRegistryError},
+        infrastructure::{
+            config_registry::{ConfiguredInstanceRegistry, InstanceRegistryError},
+            systemd_runtime::{SystemdReloadError, reload_systemd_manager},
+        },
     },
     shared::config::{AppConfig, ConfigError},
 };
 
-pub fn execute(command: InstanceCommand) -> Result<(), InstanceCliError> {
+pub async fn execute(command: InstanceCommand) -> Result<(), InstanceCliError> {
     match command {
         InstanceCommand::List(args) => list(args),
         InstanceCommand::Add(args) => add(args),
         InstanceCommand::Edit(args) => edit(args),
         InstanceCommand::Remove(args) => remove(args),
+        InstanceCommand::RenderSystemd(args) => render_systemd(args).await,
     }
 }
 
@@ -209,6 +214,344 @@ fn finish_mutation(
     );
     print_result(output, &result, human)?;
     Ok(())
+}
+
+async fn render_systemd(args: InstanceRenderSystemdArgs) -> Result<(), InstanceCliError> {
+    let loaded = LoadedRegistry::read(&args.config)?;
+    let descriptor = loaded
+        .registry
+        .list()
+        .into_iter()
+        .find(|instance| instance.id().as_str() == args.id)
+        .ok_or_else(|| InstanceCliError::NotFound(args.id.clone()))?;
+    if descriptor.kind() != InstanceKind::Auxiliary
+        || descriptor.management() != InstanceManagement::Systemd
+    {
+        return Err(InstanceCliError::NotSystemdManaged(args.id));
+    }
+    let configured = loaded
+        .registry
+        .configured(descriptor.id())
+        .ok_or_else(|| InstanceCliError::NotFound(descriptor.id().to_string()))?;
+    let systemd_unit = configured
+        .systemd_unit()
+        .ok_or_else(|| InstanceCliError::NotSystemdManaged(descriptor.id().to_string()))?
+        .as_str()
+        .to_owned();
+    let storage_root = configured.storage_root().to_path_buf();
+    let executable = args
+        .executable
+        .clone()
+        .unwrap_or_else(|| storage_root.join("omp-server"));
+
+    validate_render_paths(
+        &storage_root,
+        &executable,
+        &args.systemd_directory,
+        &args.instance_environment_directory,
+    )?;
+    validate_identity(&args.user, IdentityKind::User)?;
+    validate_identity(&args.group, IdentityKind::Group)?;
+    validate_executable(&storage_root, &executable)?;
+
+    let drop_in_directory = args.systemd_directory.join(format!("{systemd_unit}.d"));
+    let drop_in_file = drop_in_directory.join("override.conf");
+    let environment_file = args
+        .instance_environment_directory
+        .join(format!("{}.env", descriptor.id()));
+    let needs_home_access = path_requires_home_access(&storage_root);
+    let contents = render_drop_in(
+        &storage_root,
+        &executable,
+        &environment_file,
+        &args.user,
+        &args.group,
+        needs_home_access,
+    )?;
+    let existing = match fs::read(&drop_in_file) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(io_error("read existing systemd drop-in", &drop_in_file, error).into());
+        }
+    };
+    let changed = existing.as_deref() != Some(contents.as_bytes());
+    let replacing = existing.is_some() && changed;
+    if replacing && !args.dry_run && !args.yes {
+        return Err(InstanceCliError::DropInConfirmationRequired(drop_in_file));
+    }
+
+    let mut result = SystemdRenderResult {
+        instance_id: descriptor.id().to_string(),
+        systemd_unit,
+        storage_root,
+        executable,
+        user: args.user,
+        group: args.group,
+        drop_in_file,
+        environment_file,
+        protect_home: !needs_home_access,
+        dry_run: args.dry_run,
+        changed,
+        backup: None,
+        daemon_reloaded: false,
+        generated_contents: contents.clone(),
+        acl_guidance: vec![
+            "Grant the game-server account only the access required by this instance root."
+                .into(),
+            "If configuration is enabled, ensure the lara-game group can read and write the intended files."
+                .into(),
+            "Do not use recursive chown until the exact storage root has been reviewed.".into(),
+        ],
+    };
+
+    if changed && !args.dry_run {
+        result.backup = install_drop_in(
+            &loaded.overlay_file,
+            &loaded.source,
+            &drop_in_directory,
+            &result.drop_in_file,
+            existing.as_deref(),
+            contents.as_bytes(),
+        )?;
+        if args.reload {
+            reload_systemd_manager().await.map_err(|source| {
+                InstanceCliError::ReloadAfterInstall {
+                    path: result.drop_in_file.clone(),
+                    source,
+                }
+            })?;
+            result.daemon_reloaded = true;
+        }
+    }
+
+    let mode = if args.dry_run {
+        "planned"
+    } else if changed {
+        "installed"
+    } else {
+        "already current"
+    };
+    let mut human = format!(
+        "systemd drop-in {mode}: {}\nunit: {}\nworking directory: {}\nexecutable: {}\nProtectHome: {}\ndaemon reloaded: {}\ninstance was not enabled or started",
+        result.drop_in_file.display(),
+        result.systemd_unit,
+        result.storage_root.display(),
+        result.executable.display(),
+        if result.protect_home { "yes" } else { "no" },
+        result.daemon_reloaded,
+    );
+    if args.dry_run {
+        human.push_str("\n\ngenerated drop-in:\n");
+        human.push_str(&result.generated_contents);
+    }
+    print_result(args.config.output, &result, human)?;
+    Ok(())
+}
+
+fn validate_render_paths(
+    storage_root: &Path,
+    executable: &Path,
+    systemd_directory: &Path,
+    environment_directory: &Path,
+) -> Result<(), InstanceCliError> {
+    for (name, path) in [
+        ("storage root", storage_root),
+        ("executable", executable),
+        ("systemd directory", systemd_directory),
+        ("instance environment directory", environment_directory),
+    ] {
+        if !path.is_absolute() {
+            return Err(InstanceCliError::PathMustBeAbsolute {
+                name,
+                path: path.to_path_buf(),
+            });
+        }
+        let text = path.to_string_lossy();
+        if text.contains(['\n', '\r', '\0', '%', '$']) {
+            return Err(InstanceCliError::UnsafeSystemdPath(path.to_path_buf()));
+        }
+    }
+    if !executable.starts_with(storage_root) {
+        return Err(InstanceCliError::ExecutableOutsideStorageRoot {
+            executable: executable.to_path_buf(),
+            storage_root: storage_root.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_executable(storage_root: &Path, executable: &Path) -> Result<(), InstanceCliError> {
+    let root_metadata = fs::symlink_metadata(storage_root)
+        .map_err(|error| io_error("inspect instance storage root", storage_root, error))?;
+    if !root_metadata.is_dir() || root_metadata.file_type().is_symlink() {
+        return Err(InstanceCliError::InvalidStorageRoot(
+            storage_root.to_path_buf(),
+        ));
+    }
+    let executable_metadata = fs::metadata(executable)
+        .map_err(|error| io_error("inspect game-server executable", executable, error))?;
+    if !executable_metadata.is_file() {
+        return Err(InstanceCliError::InvalidExecutable(
+            executable.to_path_buf(),
+        ));
+    }
+    let canonical_root = fs::canonicalize(storage_root)
+        .map_err(|error| io_error("canonicalize instance storage root", storage_root, error))?;
+    let canonical_executable = fs::canonicalize(executable)
+        .map_err(|error| io_error("canonicalize game-server executable", executable, error))?;
+    if !canonical_executable.starts_with(&canonical_root) {
+        return Err(InstanceCliError::ExecutableOutsideStorageRoot {
+            executable: canonical_executable,
+            storage_root: canonical_root,
+        });
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if executable_metadata.permissions().mode() & 0o111 == 0 {
+            return Err(InstanceCliError::ExecutablePermission(
+                executable.to_path_buf(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum IdentityKind {
+    User,
+    Group,
+}
+
+fn validate_identity(name: &str, kind: IdentityKind) -> Result<(), InstanceCliError> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'));
+    if !valid {
+        return Err(InstanceCliError::InvalidUnixIdentity(name.to_owned()));
+    }
+    #[cfg(unix)]
+    {
+        let database = match kind {
+            IdentityKind::User => Path::new("/etc/passwd"),
+            IdentityKind::Group => Path::new("/etc/group"),
+        };
+        let contents = fs::read_to_string(database)
+            .map_err(|error| io_error("read Unix identity database", database, error))?;
+        if !contents
+            .lines()
+            .any(|line| line.split_once(':').is_some_and(|(entry, _)| entry == name))
+        {
+            return Err(InstanceCliError::UnixIdentityNotFound(name.to_owned()));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = kind;
+    Ok(())
+}
+
+fn render_drop_in(
+    storage_root: &Path,
+    executable: &Path,
+    environment_file: &Path,
+    user: &str,
+    group: &str,
+    under_home: bool,
+) -> Result<String, InstanceCliError> {
+    let root = quote_systemd_path(storage_root)?;
+    let executable = quote_systemd_path(executable)?;
+    let environment = quote_systemd_path(environment_file)?;
+    Ok(format!(
+        "# Generated by `lara instance render-systemd`; local edits require explicit reconciliation.\n[Service]\nUser={user}\nGroup={group}\nWorkingDirectory={root}\nExecStart=\nExecStart={executable}\nEnvironmentFile=\nEnvironmentFile=-{environment}\nProtectHome={}\nReadWritePaths=\nReadWritePaths={root}\n",
+        if under_home { "no" } else { "yes" }
+    ))
+}
+
+fn quote_systemd_path(path: &Path) -> Result<String, InstanceCliError> {
+    let text = path
+        .to_str()
+        .ok_or_else(|| InstanceCliError::NonUtf8SystemdPath(path.to_path_buf()))?;
+    if text.contains(['\n', '\r', '\0', '%', '$']) {
+        return Err(InstanceCliError::UnsafeSystemdPath(path.to_path_buf()));
+    }
+    Ok(format!(
+        "\"{}\"",
+        text.replace('\\', "\\\\").replace('"', "\\\"")
+    ))
+}
+
+fn path_requires_home_access(path: &Path) -> bool {
+    let mut components = path.components();
+    if !matches!(components.next(), Some(std::path::Component::RootDir)) {
+        return false;
+    }
+    match components.next().map(|component| component.as_os_str()) {
+        Some(component) if component == "home" || component == "root" => true,
+        Some(component) if component == "run" => components
+            .next()
+            .is_some_and(|component| component.as_os_str() == "user"),
+        _ => false,
+    }
+}
+
+fn install_drop_in(
+    overlay_file: &Path,
+    expected_overlay: &str,
+    drop_in_directory: &Path,
+    drop_in_file: &Path,
+    expected_existing: Option<&[u8]>,
+    contents: &[u8],
+) -> Result<Option<PathBuf>, InstanceCliError> {
+    let config_directory = overlay_file
+        .parent()
+        .ok_or_else(|| InstanceCliError::InvalidOverlayPath(overlay_file.to_path_buf()))?;
+    let lock_path = config_directory.join(".lara-config.lock");
+    let lock = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(&lock_path)
+        .map_err(|error| io_error("open configuration lock", &lock_path, error))?;
+    lock.lock()
+        .map_err(|error| io_error("lock configuration directory", &lock_path, error))?;
+    let current_overlay = fs::read_to_string(overlay_file)
+        .map_err(|error| io_error("re-read production overlay", overlay_file, error))?;
+    if current_overlay != expected_overlay {
+        return Err(InstanceCliError::ConcurrentModification(
+            overlay_file.to_path_buf(),
+        ));
+    }
+    let current = match fs::read(drop_in_file) {
+        Ok(contents) => Some(contents),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => {
+            return Err(io_error("re-read systemd drop-in", drop_in_file, error).into());
+        }
+    };
+    if current.as_deref() != expected_existing {
+        return Err(InstanceCliError::ConcurrentModification(
+            drop_in_file.to_path_buf(),
+        ));
+    }
+    fs::create_dir_all(drop_in_directory)
+        .map_err(|error| io_error("create systemd drop-in directory", drop_in_directory, error))?;
+    let backup = if current.is_some() {
+        let backup = backup_path(drop_in_file);
+        fs::copy(drop_in_file, &backup)
+            .map_err(|error| io_error("back up systemd drop-in", drop_in_file, error))?;
+        Some(backup)
+    } else {
+        None
+    };
+    atomic_write_with_mode(drop_in_file, contents, drop_in_directory, 0o644)?;
+    sync_directory(drop_in_directory)?;
+    File::unlock(&lock)
+        .map_err(|error| io_error("unlock configuration directory", &lock_path, error))?;
+    Ok(backup)
 }
 
 struct LoadedRegistry {
@@ -513,6 +856,26 @@ struct MutationResult {
     storage_files_changed: bool,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemdRenderResult {
+    instance_id: String,
+    systemd_unit: String,
+    storage_root: PathBuf,
+    executable: PathBuf,
+    user: String,
+    group: String,
+    drop_in_file: PathBuf,
+    environment_file: PathBuf,
+    protect_home: bool,
+    dry_run: bool,
+    changed: bool,
+    backup: Option<PathBuf>,
+    daemon_reloaded: bool,
+    generated_contents: String,
+    acl_guidance: Vec<String>,
+}
+
 #[derive(Debug, Error)]
 pub enum InstanceCliError {
     #[error("instance `{0}` is already registered")]
@@ -521,6 +884,8 @@ pub enum InstanceCliError {
     NotFound(String),
     #[error("primary instance `{0}` cannot be edited or removed in Release B")]
     PrimaryImmutable(String),
+    #[error("instance `{0}` is not a systemd-managed auxiliary")]
+    NotSystemdManaged(String),
     #[error("instance edit requires at least one changed field")]
     NoChanges,
     #[error("removing instance `{0}` requires --yes (or use --dry-run)")]
@@ -531,6 +896,31 @@ pub enum InstanceCliError {
     InvalidOverlayPath(PathBuf),
     #[error("production overlay changed while the command was running: {0}")]
     ConcurrentModification(PathBuf),
+    #[error("replacing systemd drop-in `{}` requires --yes (or use --dry-run)", .0.display())]
+    DropInConfirmationRequired(PathBuf),
+    #[error("{name} must be an absolute path: {}", path.display())]
+    PathMustBeAbsolute { name: &'static str, path: PathBuf },
+    #[error("path contains characters with unsafe systemd expansion semantics: {}", .0.display())]
+    UnsafeSystemdPath(PathBuf),
+    #[error("systemd path is not valid UTF-8: {}", .0.display())]
+    NonUtf8SystemdPath(PathBuf),
+    #[error("instance storage root must be a real directory, not a symlink: {}", .0.display())]
+    InvalidStorageRoot(PathBuf),
+    #[error("game-server executable is not a regular file: {}", .0.display())]
+    InvalidExecutable(PathBuf),
+    #[error("game-server executable is not marked executable: {}", .0.display())]
+    #[cfg(unix)]
+    ExecutablePermission(PathBuf),
+    #[error("executable `{}` is outside storage root `{}`", executable.display(), storage_root.display())]
+    ExecutableOutsideStorageRoot {
+        executable: PathBuf,
+        storage_root: PathBuf,
+    },
+    #[error("invalid Unix user or group name `{0}`")]
+    InvalidUnixIdentity(String),
+    #[error("Unix user or group `{0}` does not exist")]
+    #[cfg(unix)]
+    UnixIdentityNotFound(String),
     #[error("environment file is missing or invalid: {0}")]
     InvalidEnvironmentFile(PathBuf),
     #[error(transparent)]
@@ -539,6 +929,12 @@ pub enum InstanceCliError {
     Config(#[from] ConfigError),
     #[error(transparent)]
     Registry(#[from] InstanceRegistryError),
+    #[error("systemd drop-in was installed at `{}` but manager reload failed: {source}", path.display())]
+    ReloadAfterInstall {
+        path: PathBuf,
+        #[source]
+        source: SystemdReloadError,
+    },
     #[error(transparent)]
     Toml(#[from] toml_edit::TomlError),
 }
@@ -656,5 +1052,48 @@ LARA_MONGODB__URI=mongodb://localhost:27017
             "keep"
         );
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn renderer_disables_protect_home_only_for_home_roots() {
+        let home = render_drop_in(
+            Path::new("/home/svr_test"),
+            Path::new("/home/svr_test/omp-server"),
+            Path::new("/etc/lara/game-instances/test.env"),
+            "lara-game",
+            "lara-game",
+            true,
+        )
+        .unwrap();
+        assert!(home.contains("WorkingDirectory=\"/home/svr_test\""));
+        assert!(home.contains("ExecStart=\"/home/svr_test/omp-server\""));
+        assert!(home.contains("ProtectHome=no"));
+        assert!(home.contains("ReadWritePaths=\"/home/svr_test\""));
+        assert!(!home.contains("start "));
+
+        let srv = render_drop_in(
+            Path::new("/srv/openmp/test"),
+            Path::new("/srv/openmp/test/omp-server"),
+            Path::new("/etc/lara/game-instances/test.env"),
+            "lara-game",
+            "lara-game",
+            false,
+        )
+        .unwrap();
+        assert!(srv.contains("ProtectHome=yes"));
+    }
+
+    #[test]
+    fn systemd_paths_reject_specifier_and_environment_expansion() {
+        for unsafe_path in ["/srv/openmp/%i", "/srv/openmp/$INSTANCE"] {
+            assert!(matches!(
+                quote_systemd_path(Path::new(unsafe_path)),
+                Err(InstanceCliError::UnsafeSystemdPath(_))
+            ));
+        }
+        assert!(matches!(
+            validate_identity("lara game", IdentityKind::User),
+            Err(InstanceCliError::InvalidUnixIdentity(_))
+        ));
     }
 }

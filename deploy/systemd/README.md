@@ -182,8 +182,27 @@ root, его содержимое, drop-in или запущенный проц�
 проверяется полным startup-валидатором, выполняется под file lock, создаёт
 timestamped backup и устанавливается atomic rename.
 
-До реализации `instance render-systemd` эти команды не создают systemd drop-in
-и не вызывают `daemon-reload`, `enable`, `start` или `stop`.
+После регистрации drop-in можно сначала проверить, а затем установить отдельной
+командой:
+
+```sh
+sudo lara instance render-systemd dev-dm --dry-run
+sudo lara instance render-systemd dev-dm
+```
+
+Команда проверяет, что storage root существует, не является symlink, а
+`omp-server` — обычный исполняемый файл внутри этого root. Для нестандартного
+имени используются `--executable`, `--user` и `--group`. Путь под `/home`
+автоматически получает `ProtectHome=no`; для остальных путей сохраняется
+`ProtectHome=yes`. В обоих случаях `ReadWritePaths` ограничен единственным
+storage root.
+
+Drop-in устанавливается с режимом `0644`. При замене требуется `--yes` и
+создаётся backup. После изменения Lara вызывает manager `Reload` через systemd
+D-Bus; для подготовки offline image предусмотрен `--no-reload`. Команда не
+вызывает `enable`, `start`, `stop`, не создаёт environment-файл и не меняет
+владельцев игровых ресурсов. Ожидаемый необязательный environment-файл и план
+ACL возвращаются в human/JSON output.
 
 Эквивалентная ручная форма production overlay содержит как primary, так и
 auxiliary: массив `game_server.instances` заменяется целиком.

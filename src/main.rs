@@ -31,7 +31,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match cli.command {
         Command::Serve => serve().await,
         Command::Config { command } => admin_cli::config::execute(command).map_err(Into::into),
-        Command::Instance { command } => admin_cli::instance::execute(command).map_err(Into::into),
+        Command::Instance { command } => admin_cli::instance::execute(command)
+            .await
+            .map_err(Into::into),
     }
 }
 

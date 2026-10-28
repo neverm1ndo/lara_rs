@@ -16,6 +16,49 @@ const SYSTEMD_MANAGER_PATH: &str = "/org/freedesktop/systemd1";
 const SYSTEMD_MANAGER_INTERFACE: &str = "org.freedesktop.systemd1.Manager";
 const SYSTEMD_JOB_MODE: &str = "replace";
 
+/// Reloads systemd unit definitions through the manager D-Bus API. This is
+/// intentionally separate from lifecycle dispatch: it cannot select or start
+/// a unit and is used only after the admin CLI installs a validated drop-in.
+pub async fn reload_systemd_manager() -> Result<(), SystemdReloadError> {
+    let connection = Connection::system()
+        .await
+        .map_err(SystemdReloadError::unavailable)?;
+    let manager = Proxy::new(
+        &connection,
+        SYSTEMD_DESTINATION,
+        SYSTEMD_MANAGER_PATH,
+        SYSTEMD_MANAGER_INTERFACE,
+    )
+    .await
+    .map_err(SystemdReloadError::unavailable)?;
+    manager
+        .call::<_, _, ()>("Reload", &())
+        .await
+        .map_err(SystemdReloadError::rejected)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum SystemdReloadError {
+    #[error("systemd D-Bus is unavailable: {message}")]
+    Unavailable { message: String },
+    #[error("systemd rejected the manager reload: {message}")]
+    Rejected { message: String },
+}
+
+impl SystemdReloadError {
+    fn unavailable(error: zbus::Error) -> Self {
+        Self::Unavailable {
+            message: error.to_string(),
+        }
+    }
+
+    fn rejected(error: zbus::Error) -> Self {
+        Self::Rejected {
+            message: error.to_string(),
+        }
+    }
+}
+
 type ManagerFuture<'a> =
     Pin<Box<dyn Future<Output = Result<String, SystemdManagerError>> + Send + 'a>>;
 

@@ -165,9 +165,13 @@ capabilities, затем:
 list/add/edit/remove` отвечают только за реестр в production overlay: они
 сохраняют TOML-комментарии, материализуют legacy primary при первом добавлении,
 повторно используют полный startup-валидатор и не касаются storage root.
-Генерация drop-in, проверка executable/Unix user и `daemon-reload` относятся к
-следующей команде `instance render-systemd`; до неё registry CLI не выдаёт себя
-за завершённый systemd deployment.
+Команда `instance render-systemd` реализует следующий отдельный этап: проверяет
+существование root, executable и Unix identity, генерирует минимальный drop-in,
+учитывает `/home`, атомарно устанавливает файл и вызывает manager `Reload`
+через systemd D-Bus. Она намеренно не выполняет `enable`, `start`, `stop`,
+рекурсивный `chown` или создание process environment-файла. Проверка effective
+unit и диагностический отчёт остаются ответственностью `instance verify` и
+`doctor`.
 
 CLI использует file lock, временный файл, `fsync` и atomic rename. Перед
 изменением существующего файла создаётся резервная копия. Удаление регистрации

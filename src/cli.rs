@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
 
 /// Lara game-server control plane and administration CLI.
 #[derive(Debug, Parser)]
@@ -43,6 +43,8 @@ pub enum InstanceCommand {
     Edit(InstanceEditArgs),
     /// Remove an auxiliary registration without deleting server files.
     Remove(InstanceRemoveArgs),
+    /// Render the validated systemd drop-in for an auxiliary instance.
+    RenderSystemd(InstanceRenderSystemdArgs),
 }
 
 #[derive(Debug, Args, Clone, PartialEq, Eq)]
@@ -130,6 +132,38 @@ pub struct InstanceRemoveArgs {
     /// Show the validated mutation without changing the overlay.
     #[arg(long)]
     pub dry_run: bool,
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct InstanceRenderSystemdArgs {
+    /// Stable identifier of a registered systemd-managed auxiliary instance.
+    pub id: String,
+    /// Absolute game-server executable; defaults to <storage-root>/omp-server.
+    #[arg(long)]
+    pub executable: Option<PathBuf>,
+    /// Unix account used by the game-server process.
+    #[arg(long, default_value = "lara-game")]
+    pub user: String,
+    /// Unix group used by the game-server process.
+    #[arg(long, default_value = "lara-game")]
+    pub group: String,
+    /// Root containing host systemd units and instance drop-ins.
+    #[arg(long, default_value = "/etc/systemd/system")]
+    pub systemd_directory: PathBuf,
+    /// Directory for optional per-instance process environment files.
+    #[arg(long, default_value = "/etc/lara/game-instances")]
+    pub instance_environment_directory: PathBuf,
+    /// Show paths and generated content without changing the host.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Permit replacement of an existing non-identical drop-in after backup.
+    #[arg(long)]
+    pub yes: bool,
+    /// Write files without asking systemd to reload its unit definitions.
+    #[arg(long = "no-reload", action = ArgAction::SetFalse, default_value_t = true)]
+    pub reload: bool,
     #[command(flatten)]
     pub config: InstanceConfigArgs,
 }
@@ -308,5 +342,31 @@ mod tests {
             ]
         );
         assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_systemd_render_without_implicit_lifecycle_action() {
+        let cli = Cli::try_parse_from([
+            "lara",
+            "instance",
+            "render-systemd",
+            "test",
+            "--executable",
+            "/home/svr_test/omp-server",
+            "--dry-run",
+            "--no-reload",
+        ])
+        .unwrap();
+
+        let Command::Instance {
+            command: InstanceCommand::RenderSystemd(args),
+        } = cli.command
+        else {
+            panic!("expected instance render-systemd command")
+        };
+        assert_eq!(args.id, "test");
+        assert!(args.dry_run);
+        assert!(!args.reload);
+        assert!(!args.yes);
     }
 }
