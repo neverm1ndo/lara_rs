@@ -352,6 +352,19 @@ async fn render_systemd(args: InstanceRenderSystemdArgs) -> Result<(), InstanceC
 }
 
 async fn verify(args: InstanceVerifyArgs) -> Result<(), InstanceCliError> {
+    let output = args.config.output;
+    let report = collect_instance_verification(args).await?;
+    let failures = report.failures;
+    print_result(output, &report, human_verification_report(&report))?;
+    if failures != 0 {
+        return Err(InstanceCliError::VerificationFailed { failures });
+    }
+    Ok(())
+}
+
+pub(super) async fn collect_instance_verification(
+    args: InstanceVerifyArgs,
+) -> Result<InstanceVerificationReport, InstanceCliError> {
     let loaded = LoadedRegistry::read(&args.config)?;
     let descriptor = loaded
         .registry
@@ -450,15 +463,18 @@ async fn verify(args: InstanceVerifyArgs) -> Result<(), InstanceCliError> {
         .iter()
         .filter(|check| check.status == VerificationStatus::Warning)
         .count();
-    let report = InstanceVerificationReport {
+    Ok(InstanceVerificationReport {
         valid: failures == 0,
         instance_id: descriptor.id().to_string(),
         systemd_unit,
         failures,
         warnings,
         checks,
-    };
-    let human = report
+    })
+}
+
+pub(super) fn human_verification_report(report: &InstanceVerificationReport) -> String {
+    report
         .checks
         .iter()
         .map(|check| {
@@ -482,12 +498,7 @@ async fn verify(args: InstanceVerifyArgs) -> Result<(), InstanceCliError> {
             report.warnings
         )))
         .collect::<Vec<_>>()
-        .join("\n");
-    print_result(args.config.output, &report, human)?;
-    if failures != 0 {
-        return Err(InstanceCliError::VerificationFailed { failures });
-    }
-    Ok(())
+        .join("\n")
 }
 
 fn check_result(
@@ -1259,22 +1270,22 @@ struct SystemdRenderResult {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct InstanceVerificationReport {
-    valid: bool,
-    instance_id: String,
-    systemd_unit: String,
-    failures: usize,
-    warnings: usize,
-    checks: Vec<VerificationCheck>,
+pub(super) struct InstanceVerificationReport {
+    pub valid: bool,
+    pub instance_id: String,
+    pub systemd_unit: String,
+    pub failures: usize,
+    pub warnings: usize,
+    pub checks: Vec<VerificationCheck>,
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct VerificationCheck {
-    id: &'static str,
-    status: VerificationStatus,
-    summary: String,
-    detail: Option<String>,
+pub(super) struct VerificationCheck {
+    pub id: &'static str,
+    pub status: VerificationStatus,
+    pub summary: String,
+    pub detail: Option<String>,
 }
 
 impl VerificationCheck {
@@ -1307,14 +1318,14 @@ impl VerificationCheck {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-enum VerificationStatus {
+pub(super) enum VerificationStatus {
     Passed,
     Warning,
     Failed,
 }
 
 impl VerificationStatus {
-    const fn label(self) -> &'static str {
+    pub(super) const fn label(self) -> &'static str {
         match self {
             Self::Passed => "PASS",
             Self::Warning => "WARN",

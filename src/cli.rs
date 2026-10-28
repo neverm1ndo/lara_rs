@@ -31,6 +31,8 @@ pub enum Command {
         #[command(subcommand)]
         command: InstanceCommand,
     },
+    /// Run read-only deployment diagnostics across configuration and dependencies.
+    Doctor(DoctorArgs),
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -170,7 +172,7 @@ pub struct InstanceRenderSystemdArgs {
     pub config: InstanceConfigArgs,
 }
 
-#[derive(Debug, Args, PartialEq, Eq)]
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
 pub struct InstanceVerifyArgs {
     /// Stable identifier of a registered systemd-managed auxiliary instance.
     pub id: String,
@@ -191,6 +193,40 @@ pub struct InstanceVerifyArgs {
     pub instance_environment_directory: PathBuf,
     #[command(flatten)]
     pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct DoctorArgs {
+    /// Restrict instance checks to one registered auxiliary.
+    #[arg(long)]
+    pub instance: Option<String>,
+    /// Explicit production TOML overlay.
+    #[arg(long, default_value = "/etc/lara/production.toml")]
+    pub overlay_file: PathBuf,
+    /// Environment file containing secrets and connection strings.
+    #[arg(long, default_value = "/etc/lara/lara.env")]
+    pub environment_file: PathBuf,
+    /// Root containing host systemd units and instance drop-ins.
+    #[arg(long, default_value = "/etc/systemd/system")]
+    pub systemd_directory: PathBuf,
+    /// Directory for optional per-instance process environment files.
+    #[arg(long, default_value = "/etc/lara/game-instances")]
+    pub instance_environment_directory: PathBuf,
+    /// Expected Unix game-server account.
+    #[arg(long, default_value = "lara-game")]
+    pub user: String,
+    /// Expected Unix game-server group.
+    #[arg(long, default_value = "lara-game")]
+    pub group: String,
+    /// Installed least-privilege polkit rule to verify.
+    #[arg(long, default_value = "/usr/share/polkit-1/rules.d/49-lara-rs.rules")]
+    pub polkit_rule: PathBuf,
+    /// Timeout applied independently to each database check.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=60))]
+    pub database_timeout_seconds: u64,
+    /// Output format for automation or human operators.
+    #[arg(long, value_enum, default_value_t)]
+    pub output: OutputFormat,
 }
 
 #[derive(Debug, Clone, Copy, Default, ValueEnum, PartialEq, Eq)]
@@ -328,7 +364,7 @@ mod tests {
                 .get_subcommands()
                 .map(clap::Command::get_name)
                 .collect::<Vec<_>>(),
-            ["serve", "config", "instance"]
+            ["serve", "config", "instance", "doctor"]
         );
     }
 
@@ -408,5 +444,27 @@ mod tests {
         };
         assert_eq!(args.id, "test");
         assert_eq!(args.config.output, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_scoped_doctor_with_bounded_database_timeout() {
+        let cli = Cli::try_parse_from([
+            "lara",
+            "doctor",
+            "--instance",
+            "test",
+            "--database-timeout-seconds",
+            "10",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+
+        let Command::Doctor(args) = cli.command else {
+            panic!("expected doctor command")
+        };
+        assert_eq!(args.instance.as_deref(), Some("test"));
+        assert_eq!(args.database_timeout_seconds, 10);
+        assert_eq!(args.output, OutputFormat::Json);
     }
 }

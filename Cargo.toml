@@ -18,7 +18,7 @@ and the game-instance verification utility.\
 """
 section = "admin"
 priority = "optional"
-depends = "$auto, adduser, systemd"
+depends = "$auto, adduser, polkitd, systemd"
 maintainer-scripts = "debian"
 changelog = "debian/changelog"
 assets = [
@@ -32,6 +32,7 @@ assets = [
     ["deploy/systemd/README.md", "usr/share/doc/lara-rs/systemd-pilot.md", "644"],
     ["deploy/systemd/verify-pilot.sh", "usr/lib/lara-rs/verify-pilot", "755"],
     ["deploy/systemd/lara-game@.service", "usr/lib/systemd/system/lara-game@.service", "644"],
+    ["deploy/polkit/49-lara-rs.rules", "usr/share/polkit-1/rules.d/49-lara-rs.rules", "644"],
 ]
 systemd-units = [
     { unit-name = "lara-rs", unit-scripts = "deploy/systemd", enable = false, start = false },

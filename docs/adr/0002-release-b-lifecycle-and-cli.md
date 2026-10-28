@@ -206,6 +206,16 @@ code при блокирующей проблеме. Проверяются ка
 Human-readable вывод используется по умолчанию; `--output json` предоставляет
 стабильный контракт для автоматизации.
 
+Реализованный `doctor` агрегирует startup validation, registry, bounded-time
+MySQL/MongoDB ping, host storage, `instance verify` и `/proc` cgroup ownership.
+Проверки изолированы: недоступная база не скрывает drift другого инстанса.
+Совпадение executable вне ожидаемого cgroup является blocking failure.
+Установленное polkit-правило сравнивается с embedded эталоном и разрешает
+пользователю `lara` только start/stop/restart для
+`lara-game@<valid-id>.service`; проверка реального решения polkit остаётся
+Linux integration test, поэтому `doctor` явно отмечает её warning, а не
+создаёт изменяющую пробную команду.
+
 ### Lifecycle operation
 
 Изменяющий HTTP-запрос создаёт в MongoDB `LifecycleOperation` до обращения к
@@ -432,11 +442,7 @@ readiness через UDS не реализован. Auxiliary даёт безо�
 
 ## Последующие решения
 
-Отдельные ADR или implementation notes должны уточнить:
-
-- точное содержание polkit rule и способ его проверки без мутации unit;
-- формат MongoDB indexes, operation lease и outbox recovery;
-- CLI schema для стабильного JSON output;
-- стратегию редактирования TOML с сохранением комментариев;
-- границы следующего релиза: incidents, journald replay, UDS readiness и
-  migration primary.
+Последующего ADR требуют границы следующего релиза: incidents, journald replay,
+UDS readiness и migration primary. Polkit rule, MongoDB operation/outbox,
+стабильный CLI JSON и comment-preserving TOML editing зафиксированы реализацией
+Release B и этим ADR.

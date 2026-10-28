@@ -108,6 +108,7 @@ jobs:
           fi
           grep -Eq '^(usr/)?lib/systemd/system/lara-rs\.service$' /tmp/lara-package-files
           grep -Eq '^(usr/)?lib/systemd/system/lara-game@\.service$' /tmp/lara-package-files
+          grep -Fx 'usr/share/polkit-1/rules.d/49-lara-rs.rules' /tmp/lara-package-files
 
           lintian --fail-on error "$package"
           apt-get install -y "./$package"
@@ -128,6 +129,7 @@ jobs:
           test -r /usr/share/lara-rs/examples/lara.env.example
           test -r /usr/share/lara-rs/examples/game-instance.env.example
           test -r /usr/share/lara-rs/examples/game-instance.override.conf.example
+          cmp deploy/polkit/49-lara-rs.rules /usr/share/polkit-1/rules.d/49-lara-rs.rules
           test -r /usr/share/lara-rs/examples/production.toml.example
           systemd-analyze verify /lib/systemd/system/lara-rs.service
 

@@ -1,16 +1,17 @@
 # Пилотный игровой инстанс под systemd
 
-Этот пакет закрывает инфраструктурную часть шага 6 Release A. Он предназначен
-для одного auxiliary-инстанса. Primary на этом этапе автоматически не
-мигрируется, а Lara не получает права `StartUnit`, `StopUnit` или `RestartUnit`.
+Документ начинался как инструкция пилота Release A, а теперь описывает
+эксплуатационный контур Release B для нескольких auxiliary-инстансов. Primary
+автоматически не мигрируется. Lara получает только узкие polkit-разрешения на
+`StartUnit`, `StopUnit` и `RestartUnit` для шаблона `lara-game@*.service`.
 
 ## Установка Debian-пакета Lara
 
 Release artifact рассчитан на Debian 12 (`amd64`). Пакет устанавливает бинарник,
-`lara-rs.service`, шаблон `lara-game@.service`, примеры конфигурации и утилиту
-`/usr/lib/lara-rs/verify-pilot`. Сервис намеренно не запускается и не включается
-автоматически: сначала администратор должен добавить production-конфигурацию и
-секреты.
+`lara-rs.service`, шаблон `lara-game@.service`, минимальное polkit-правило,
+примеры конфигурации и утилиту `/usr/lib/lara-rs/verify-pilot`. Сервис намеренно
+не запускается и не включается автоматически: сначала администратор должен
+добавить production-конфигурацию и секреты.
 
 Канонический executable — `/usr/bin/lara`; systemd запускает `lara serve`.
 `/usr/bin/lara-rs` временно сохраняется как совместимый alias. Запуск `lara`
@@ -45,6 +46,28 @@ sudo systemctl enable --now lara-rs.service
 sudo systemctl --no-pager --full status lara-rs.service
 sudo journalctl -u lara-rs.service -n 100 --no-pager
 ```
+
+Общая read-only диагностика выполняется до запуска сервиса и после каждого
+изменения host-конфигурации:
+
+```sh
+sudo lara doctor
+sudo lara doctor --instance dev-dm --output json
+```
+
+`doctor` независимо проверяет startup-конфигурацию, registry, MySQL/MongoDB с
+ограниченным timeout, storage roots, packaged polkit rule, результаты
+`instance verify` и Linux `/proc` cgroup каждого найденного процесса. Совпавший
+executable вне ожидаемого `lara-game@<id>.service` считается blocking failure,
+так как обычно означает оставшийся bash/Node supervisor. Проверка не выполняет
+lifecycle-команды и не исправляет найденные проблемы.
+
+Polkit разрешает пользователю `lara` только `start`, `stop` и `restart` unit с
+именем `lara-game@<valid-id>.service`. Управление произвольными unit, reload
+daemon, enable/disable и изменение unit-файлов этим правилом не разрешаются.
+Статическая целостность правила проверяется автоматически; его эффективную
+авторизацию необходимо подтвердить Linux integration test под пользователем
+`lara`.
 
 Package upgrade сохраняет `/etc/lara` и `/var/lib/lara` и не удаляет системных
 пользователей. Package removal также не удаляет пользовательские данные.
