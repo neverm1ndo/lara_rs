@@ -19,15 +19,17 @@ Release artifact рассчитан на Debian 12 (`amd64`). Пакет уст�
 ```sh
 sudo apt install ./lara-rs_0.2.2-1_amd64.deb
 
-sudo install -o root -g lara -m 0640 \
-  /usr/share/lara-rs/examples/lara.env.example \
-  /etc/lara/lara.env
-sudo install -o root -g lara -m 0640 \
-  /usr/share/lara-rs/examples/production.toml.example \
-  /etc/lara/production.toml
+sudo lara config init --dry-run
+sudo lara config init
 ```
 
-В `/etc/lara/lara.env` необходимо задать реальные секреты и раскомментировать:
+Команда использует встроенные в тот же бинарник шаблоны, поэтому не зависит от
+наличия `/usr/share/doc`. Она не запускает сервис и не заменяет существующие
+файлы без явного `--yes`; перед разрешённой заменой создаются timestamped
+backup-файлы. Для автоматизации доступен `--output json`.
+
+В `/etc/lara/lara.env` необходимо заменить placeholder-секреты. Путь overlay
+уже указан как:
 
 ```text
 LARA_CONFIG_FILE=/etc/lara/production.toml
@@ -36,6 +38,8 @@ LARA_CONFIG_FILE=/etc/lara/production.toml
 После проверки путей, реквизитов баз данных и списка инстансов:
 
 ```sh
+sudo lara config validate
+lara config paths
 sudo systemd-analyze verify /lib/systemd/system/lara-rs.service
 sudo systemctl enable --now lara-rs.service
 sudo systemctl --no-pager --full status lara-rs.service

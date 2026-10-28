@@ -142,6 +142,13 @@ capabilities, storage roots или systemd units.
 - поддерживает `--dry-run`, `--yes` и машиночитаемый `--output json`;
 - не запускает сервис автоматически.
 
+Реализованный CLI встраивает минимальные bootstrap-шаблоны в бинарник:
+initial overlay содержит только external primary и не регистрирует фиктивный
+auxiliary. `config validate` читает environment-файл без изменения process
+environment, затем применяет обычные process overrides и запускает те же
+`AppConfig` и `ConfiguredInstanceRegistry` проверки, что daemon. `config paths`
+не читает секреты и пригоден для подготовки automation.
+
 `lara instance add` принимает стабильный ID, root, executable, Unix user и
 capabilities, затем:
 
