@@ -1,6 +1,6 @@
 [package]
 name = "lara-rs"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 autobins = false
 authors = ["neverm1ndo <it@nmnd.ru>"]
@@ -23,7 +23,8 @@ maintainer-scripts = "debian"
 changelog = "debian/changelog"
 assets = [
     ["target/release/lara", "usr/bin/lara", "755"],
-    { dest = "lara", link_name = "usr/bin/lara-rs" },
+    # cargo-deb names the symlink path `dest` and its target `link_name`.
+    { dest = "usr/bin/lara-rs", link_name = "lara" },
     ["config/default.toml", "usr/share/lara-rs/config/default.toml", "644"],
     [".env.example", "usr/share/lara-rs/examples/lara.env.example", "644"],
     ["deploy/systemd/instance.env.example", "usr/share/lara-rs/examples/game-instance.env.example", "644"],

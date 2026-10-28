@@ -1,3 +1,11 @@
+lara-rs (0.2.3-1) unstable; urgency=medium
+
+  * Add durable Developer-only lifecycle operations for auxiliary instances.
+  * Introduce the unified Lara CLI, systemd D-Bus runtime, and reconciliation.
+  * Add realtime lifecycle events, least-privilege polkit, and deployment checks.
+
+ -- neverm1ndo <it@nmnd.ru>  Wed, 28 Oct 2026 22:25:00 +0300
+
 lara-rs (0.2.2-1) unstable; urgency=medium
 
   * Add the Release A server-instance registry and capability manifest.
