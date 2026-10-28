@@ -544,7 +544,7 @@ fn check_drop_in_metadata(_path: &Path) -> VerificationCheck {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, PermissionsExt};
-        return match fs::metadata(_path) {
+        match fs::metadata(_path) {
             Ok(metadata)
                 if metadata.is_file()
                     && metadata.permissions().mode() & 0o777 == 0o644
@@ -570,7 +570,7 @@ fn check_drop_in_metadata(_path: &Path) -> VerificationCheck {
                 "drop-in metadata is unavailable",
                 Some(error.to_string()),
             ),
-        };
+        }
     }
     #[cfg(not(unix))]
     VerificationCheck::warning(

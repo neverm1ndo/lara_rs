@@ -394,6 +394,9 @@ Release B считается завершённым, когда:
   ожидаемого cgroup;
 - установка `.deb` на чистый Debian оставляет систему в безопасном
   ненастроенном состоянии и предоставляет все operational examples;
+- установленный `/usr/lib/lara-rs/smoke-release-b` подтверждает CLI,
+  production configuration, systemd definition, deployment diagnostics и
+  эффективные polkit allow/deny decisions без lifecycle-команд;
 - rollback одного auxiliary не затрагивает Lara, primary и другие инстансы.
 
 ## Последствия

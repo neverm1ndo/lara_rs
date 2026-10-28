@@ -9,9 +9,10 @@
 
 Release artifact рассчитан на Debian 12 (`amd64`). Пакет устанавливает бинарник,
 `lara-rs.service`, шаблон `lara-game@.service`, минимальное polkit-правило,
-примеры конфигурации и утилиту `/usr/lib/lara-rs/verify-pilot`. Сервис намеренно
-не запускается и не включается автоматически: сначала администратор должен
-добавить production-конфигурацию и секреты.
+примеры конфигурации и утилиты `/usr/lib/lara-rs/verify-pilot` и
+`/usr/lib/lara-rs/smoke-release-b`. Сервис намеренно не запускается и не
+включается автоматически: сначала администратор должен добавить
+production-конфигурацию и секреты.
 
 Канонический executable — `/usr/bin/lara`; systemd запускает `lara serve`.
 `/usr/bin/lara-rs` временно сохраняется как совместимый alias. Запуск `lara`
@@ -298,6 +299,22 @@ incident_tracking = true
 `observation.status = "stale"`.
 
 ## Acceptance checklist
+
+После настройки и запуска Lara итоговый read-only smoke-тест объединяет
+проверку пакета, CLI, production-конфигурации, registry, systemd unit, `doctor`
+и эффективной polkit-авторизации:
+
+```sh
+sudo /usr/lib/lara-rs/smoke-release-b dev-dm
+```
+
+Для нестандартного имени unit передайте его вторым аргументом. Скрипт требует
+запущенный `lara-rs.service`, но не выполняет lifecycle-команды, `daemon-reload`
+и не изменяет host-конфигурацию. Проверка polkit использует identity реального
+процесса Lara: разрешение `start` проверяется только как authorization query;
+сам unit не запускается. Отдельно обязательно подтверждаются отказы для
+постороннего unit и неподдерживаемого verb. Любой blocking failure завершает
+скрипт с ненулевым кодом.
 
 - `sudo lara instance verify dev-dm` завершается без blocking failures;
 - unit проходит `systemd-analyze verify`;

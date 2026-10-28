@@ -305,7 +305,7 @@ fn check_group_access(instance_id: &str, path: &Path) -> DoctorCheck {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        return match std::fs::metadata(path) {
+        match std::fs::metadata(path) {
             Ok(metadata) if metadata.permissions().mode() & 0o070 == 0o070 => DoctorCheck::passed(
                 format!("instance.{instance_id}.configuration-access"),
                 "classic group bits allow configuration traversal and writes",
@@ -321,7 +321,7 @@ fn check_group_access(instance_id: &str, path: &Path) -> DoctorCheck {
                 "configuration-capable storage permissions are unavailable",
                 Some(error.to_string()),
             ),
-        };
+        }
     }
     #[cfg(not(unix))]
     DoctorCheck::warning(
@@ -367,7 +367,7 @@ fn check_process_ownership(targets: &[(String, String, std::path::PathBuf)]) -> 
                 }
             }
         }
-        return if rogue.is_empty() {
+        if rogue.is_empty() {
             DoctorCheck::passed(
                 "process.cgroup-ownership",
                 "no registered executable runs outside its expected systemd cgroup",
@@ -379,7 +379,7 @@ fn check_process_ownership(targets: &[(String, String, std::path::PathBuf)]) -> 
                 "a registered executable is running outside its expected systemd cgroup",
                 Some(rogue.join(", ")),
             )
-        };
+        }
     }
     #[cfg(not(target_os = "linux"))]
     {

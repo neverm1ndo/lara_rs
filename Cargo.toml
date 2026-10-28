@@ -14,7 +14,7 @@ license-file = ["LICENSE.md", "4"]
 extended-description = """\
 Lara is the authenticated control plane for open.mp game servers. \
 This package installs the API daemon, systemd units, configuration examples, \
-and the game-instance verification utility.\
+and deployment verification utilities.\
 """
 section = "admin"
 priority = "optional"
@@ -31,6 +31,7 @@ assets = [
     ["deploy/systemd/production.toml.example", "usr/share/lara-rs/examples/production.toml.example", "644"],
     ["deploy/systemd/README.md", "usr/share/doc/lara-rs/systemd-pilot.md", "644"],
     ["deploy/systemd/verify-pilot.sh", "usr/lib/lara-rs/verify-pilot", "755"],
+    ["deploy/systemd/smoke-release-b.sh", "usr/lib/lara-rs/smoke-release-b", "755"],
     ["deploy/systemd/lara-game@.service", "usr/lib/systemd/system/lara-game@.service", "644"],
     ["deploy/polkit/49-lara-rs.rules", "usr/share/polkit-1/rules.d/49-lara-rs.rules", "644"],
 ]
