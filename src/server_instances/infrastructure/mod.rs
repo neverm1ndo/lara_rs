@@ -1,4 +1,5 @@
 pub mod config_registry;
+pub mod lifecycle_event_dispatcher;
 pub mod lifecycle_operation_repository;
 pub mod lifecycle_operation_support;
 pub mod lifecycle_reconciliation_worker;

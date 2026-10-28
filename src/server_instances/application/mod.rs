@@ -1,3 +1,4 @@
+pub mod lifecycle_events;
 pub mod lifecycle_operations;
 pub mod lifecycle_reconciliation;
 pub mod lifecycle_runtime;

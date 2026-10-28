@@ -1,6 +1,7 @@
 mod dto;
 mod handlers;
 pub mod openapi;
+pub mod realtime;
 mod routes;
 pub mod state;
 

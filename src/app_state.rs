@@ -38,7 +38,7 @@ pub struct AppState {
 impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        authenticator: impl AuthenticateBearerToken + 'static,
+        authenticator: Arc<dyn AuthenticateBearerToken>,
         mfa_login_service: impl MfaLogin + 'static,
         mfa_management_service: impl ManageMfa + 'static,
         get_user_service: impl GetUser + 'static,
@@ -51,7 +51,7 @@ impl AppState {
         backup_lifecycle_service: Arc<BackupLifecycleService>,
     ) -> Self {
         Self {
-            jwt_authenticator: Arc::new(authenticator),
+            jwt_authenticator: authenticator,
             mfa_login_service: Arc::new(mfa_login_service),
             mfa_management_service: Arc::new(mfa_management_service),
             get_user_service: Arc::new(get_user_service),

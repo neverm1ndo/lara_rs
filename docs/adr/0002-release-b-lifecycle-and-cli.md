@@ -293,6 +293,23 @@ ID и sequence для дедупликации. Если MongoDB topology не �
 multi-document transaction, outbox идемпотентно восстанавливается из
 канонической записи операции.
 
+Для Release B выбран embedded outbox: snapshot события и `event_version`
+хранятся в том же MongoDB-документе, что и `LifecycleOperation`. Переход
+aggregate, optimistic CAS и добавление события выполняются одним `update`,
+поэтому replica set и multi-document transaction не требуются. Dispatcher
+выдаёт событие в Socket.IO и удаляет его из массива только после успешной
+публикации. Lease допускает повтор после остановки процесса между publish и
+ack, то есть доставка намеренно at-least-once. При старте записи без
+`event_version` или с отставшим marker восстанавливают событие последней
+канонической версии.
+
+Socket.IO handshake принимает access token в `auth.token` и проверяет его тем
+же authentication service, что HTTP: подпись JWT, server-side session и
+актуальные роли пользователя. В подробную room входят только пользователи с
+Developer в `main_group` или `permissions`. Runtime state публикуется только
+при семантическом изменении systemd snapshot; его текущим источником истины
+после reconnect остаётся HTTP state endpoint.
+
 ### Debian-пакет
 
 Operational examples перемещаются из `/usr/share/doc` в

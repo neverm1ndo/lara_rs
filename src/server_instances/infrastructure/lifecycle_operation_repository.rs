@@ -3,13 +3,17 @@ use std::fmt;
 use chrono::{DateTime, Utc};
 use mongodb::{
     Collection, Database, IndexModel,
-    bson::{DateTime as BsonDateTime, doc},
+    bson::{self, Bson, DateTime as BsonDateTime, doc},
     error::{Error as MongoError, ErrorKind, WriteFailure},
-    options::IndexOptions,
+    options::{IndexOptions, ReturnDocument},
 };
 use serde::{Deserialize, Serialize};
 
 use crate::server_instances::{
+    application::lifecycle_events::{
+        ClaimedLifecycleEvent, LifecycleEventOutbox, LifecycleEventOutboxError,
+        LifecycleEventOutboxFuture, LifecycleOperationUpdatedEvent,
+    },
     application::lifecycle_operations::{
         LifecycleOperationListQuery, LifecycleOperationRepository,
         LifecycleOperationRepositoryError, LifecycleOperationRepositoryFuture,
@@ -75,12 +79,75 @@ impl MongoLifecycleOperationRepository {
                     .build(),
             )
             .build();
+        let outbox = IndexModel::builder()
+            .keys(doc! { "outbox.lease_until": 1, "outbox.event_id": 1 })
+            .options(
+                IndexOptions::builder()
+                    .name(Some("operations_embedded_outbox".into()))
+                    .build(),
+            )
+            .build();
 
         self.operations
-            .create_indexes([idempotency, active_instance, history, reconciliation])
+            .create_indexes([
+                idempotency,
+                active_instance,
+                history,
+                reconciliation,
+                outbox,
+            ])
             .await
             .map_err(database_error)?;
         Ok(())
+    }
+
+    /// Reconstructs the latest event for records written by a binary that did
+    /// not yet maintain the embedded outbox. The version marker prevents an
+    /// already delivered event from being recreated on every restart.
+    pub async fn recover_missing_events(&self) -> Result<u64, LifecycleOperationRepositoryError> {
+        let mut cursor = self
+            .operations
+            .find(doc! {
+                "$expr": {
+                    "$lt": [
+                        { "$ifNull": ["$event_version", -1_i64] },
+                        "$version"
+                    ]
+                }
+            })
+            .await
+            .map_err(database_error)?;
+        let mut recovered = 0_u64;
+        while cursor.advance().await.map_err(database_error)? {
+            let document = cursor.deserialize_current().map_err(database_error)?;
+            let operation = LifecycleOperation::try_from(document)?;
+            let event = LifecycleOutboxEventDocument::try_from(
+                &LifecycleOperationUpdatedEvent::from_operation(&operation),
+            )?;
+            let version = u64_to_i64(operation.version().get(), "version")?;
+            let result = self
+                .operations
+                .update_one(
+                    doc! {
+                        "_id": operation.id().to_string(),
+                        "version": version,
+                        "$expr": {
+                            "$lt": [
+                                { "$ifNull": ["$event_version", -1_i64] },
+                                "$version"
+                            ]
+                        }
+                    },
+                    doc! {
+                        "$set": { "event_version": version },
+                        "$push": { "outbox": event_to_bson(event)? }
+                    },
+                )
+                .await
+                .map_err(database_error)?;
+            recovered += result.modified_count;
+        }
+        Ok(recovered)
     }
 }
 
@@ -203,14 +270,32 @@ impl LifecycleOperationRepository for MongoLifecycleOperationRepository {
                     "aggregate version must be exactly one greater than expected version",
                 ));
             }
+            let canonical = LifecycleOperationDocument::try_from(operation)?;
+            let event =
+                canonical.outbox.first().cloned().ok_or_else(|| {
+                    invalid_data("operation update did not produce an outbox event")
+                })?;
+            let mut fields = bson::to_document(&canonical).map_err(|error| {
+                invalid_data(format!("failed to encode operation update: {error}"))
+            })?;
+            fields.remove("_id");
+            fields.remove("outbox");
+            let active = fields.contains_key("active_instance_id");
+            let mut update = doc! {
+                "$set": fields,
+                "$push": { "outbox": event_to_bson(event)? }
+            };
+            if !active {
+                update.insert("$unset", doc! { "active_instance_id": "" });
+            }
             let result = self
                 .operations
-                .replace_one(
+                .update_one(
                     doc! {
                         "_id": operation.id().to_string(),
                         "version": u64_to_i64(expected_version.get(), "version")?
                     },
-                    LifecycleOperationDocument::try_from(operation)?,
+                    update,
                 )
                 .await;
             match result {
@@ -223,6 +308,87 @@ impl LifecycleOperationRepository for MongoLifecycleOperationRepository {
                 }
                 Err(error) => Err(database_error(error)),
             }
+        })
+    }
+}
+
+impl LifecycleEventOutbox for MongoLifecycleOperationRepository {
+    fn claim_next<'a>(
+        &'a self,
+        now: DateTime<Utc>,
+        lease_until: DateTime<Utc>,
+        lease_token: &'a str,
+    ) -> LifecycleEventOutboxFuture<'a, Option<ClaimedLifecycleEvent>> {
+        Box::pin(async move {
+            let document = self
+                .operations
+                .find_one_and_update(
+                    doc! {
+                        "outbox.0": { "$exists": true },
+                        "$or": [
+                            { "outbox.0.lease_until": { "$exists": false } },
+                            { "outbox.0.lease_until": { "$lte": to_bson_datetime(now) } }
+                        ]
+                    },
+                    doc! {
+                        "$set": {
+                            "outbox.0.lease_until": to_bson_datetime(lease_until),
+                            "outbox.0.lease_token": lease_token
+                        },
+                        "$inc": { "outbox.0.attempts": 1_i64 }
+                    },
+                )
+                .return_document(ReturnDocument::After)
+                .await
+                .map_err(outbox_database_error)?;
+            let Some(document) = document else {
+                return Ok(None);
+            };
+            let event = document
+                .outbox
+                .into_iter()
+                .find(|event| event.lease_token.as_deref() == Some(lease_token))
+                .ok_or_else(|| {
+                    LifecycleEventOutboxError::new(
+                        "claimed operation does not contain the lease token",
+                    )
+                })?;
+            Ok(Some(ClaimedLifecycleEvent {
+                event: LifecycleOperationUpdatedEvent::try_from(event)
+                    .map_err(|error| LifecycleEventOutboxError::new(error.to_string()))?,
+                lease_token: lease_token.to_owned(),
+            }))
+        })
+    }
+
+    fn acknowledge<'a>(
+        &'a self,
+        claim: &'a ClaimedLifecycleEvent,
+    ) -> LifecycleEventOutboxFuture<'a, ()> {
+        Box::pin(async move {
+            let result = self
+                .operations
+                .update_one(
+                    doc! {
+                        "_id": claim.event.operation_id().to_string(),
+                        "outbox": { "$elemMatch": {
+                            "event_id": claim.event.event_id(),
+                            "lease_token": &claim.lease_token
+                        }}
+                    },
+                    doc! { "$pull": { "outbox": {
+                        "event_id": claim.event.event_id(),
+                        "lease_token": &claim.lease_token
+                    }}},
+                )
+                .await
+                .map_err(outbox_database_error)?;
+            if result.modified_count != 1 {
+                return Err(LifecycleEventOutboxError::new(
+                    "outbox claim was lost before acknowledgement",
+                ));
+            }
+            Ok(())
         })
     }
 }
@@ -250,6 +416,31 @@ struct LifecycleOperationDocument {
     #[serde(default)]
     completed_at: Option<BsonDateTime>,
     version: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    event_version: Option<i64>,
+    #[serde(default)]
+    outbox: Vec<LifecycleOutboxEventDocument>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct LifecycleOutboxEventDocument {
+    event_id: String,
+    sequence: i64,
+    occurred_at: BsonDateTime,
+    instance_id: String,
+    operation_id: String,
+    action: ActionDocument,
+    actor_id: i64,
+    actor_display_name: String,
+    state: StateDocument,
+    deadline: BsonDateTime,
+    #[serde(default)]
+    completed_at: Option<BsonDateTime>,
+    attempts: i64,
+    #[serde(default)]
+    lease_until: Option<BsonDateTime>,
+    #[serde(default)]
+    lease_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -332,6 +523,7 @@ impl TryFrom<&LifecycleOperation> for LifecycleOperationDocument {
     type Error = LifecycleOperationRepositoryError;
 
     fn try_from(operation: &LifecycleOperation) -> Result<Self, Self::Error> {
+        let event = LifecycleOperationUpdatedEvent::from_operation(operation);
         Ok(Self {
             id: operation.id().to_string(),
             instance_id: operation.instance_id().to_string(),
@@ -354,7 +546,56 @@ impl TryFrom<&LifecycleOperation> for LifecycleOperationDocument {
             deadline: to_bson_datetime(operation.deadline()),
             completed_at: operation.completed_at().map(to_bson_datetime),
             version: u64_to_i64(operation.version().get(), "version")?,
+            event_version: Some(u64_to_i64(operation.version().get(), "event version")?),
+            outbox: vec![LifecycleOutboxEventDocument::try_from(&event)?],
         })
+    }
+}
+
+impl TryFrom<&LifecycleOperationUpdatedEvent> for LifecycleOutboxEventDocument {
+    type Error = LifecycleOperationRepositoryError;
+
+    fn try_from(event: &LifecycleOperationUpdatedEvent) -> Result<Self, Self::Error> {
+        Ok(Self {
+            event_id: event.event_id().to_owned(),
+            sequence: u64_to_i64(event.sequence().get(), "event sequence")?,
+            occurred_at: to_bson_datetime(event.occurred_at()),
+            instance_id: event.instance_id().to_string(),
+            operation_id: event.operation_id().to_string(),
+            action: event.action().into(),
+            actor_id: event.actor_id().get(),
+            actor_display_name: event.actor_display_name().to_owned(),
+            state: StateDocument::from(event.state()),
+            deadline: to_bson_datetime(event.deadline()),
+            completed_at: event.completed_at().map(to_bson_datetime),
+            attempts: 0,
+            lease_until: None,
+            lease_token: None,
+        })
+    }
+}
+
+impl TryFrom<LifecycleOutboxEventDocument> for LifecycleOperationUpdatedEvent {
+    type Error = LifecycleOperationRepositoryError;
+
+    fn try_from(event: LifecycleOutboxEventDocument) -> Result<Self, Self::Error> {
+        LifecycleOperationUpdatedEvent::rehydrate(
+            event.event_id,
+            LifecycleOperationVersion::from_value(i64_to_u64(event.sequence, "event sequence")?),
+            from_bson_datetime(event.occurred_at)?,
+            ServerInstanceId::new(event.instance_id).map_err(invalid_domain)?,
+            event
+                .operation_id
+                .parse()
+                .map_err(|error| invalid_data(format!("invalid event operation ID: {error}")))?,
+            event.action.into(),
+            LifecycleActorId::new(event.actor_id).map_err(invalid_domain)?,
+            event.actor_display_name,
+            LifecycleOperationState::try_from(event.state)?,
+            from_bson_datetime(event.deadline)?,
+            event.completed_at.map(from_bson_datetime).transpose()?,
+        )
+        .map_err(invalid_domain)
     }
 }
 
@@ -362,6 +603,14 @@ impl TryFrom<LifecycleOperationDocument> for LifecycleOperation {
     type Error = LifecycleOperationRepositoryError;
 
     fn try_from(document: LifecycleOperationDocument) -> Result<Self, Self::Error> {
+        if document
+            .event_version
+            .is_some_and(|event_version| event_version > document.version)
+        {
+            return Err(invalid_data(
+                "event version cannot be ahead of the canonical operation",
+            ));
+        }
         let state = LifecycleOperationState::try_from(document.state)?;
         let expected_active_marker =
             (!state.is_terminal()).then_some(document.instance_id.as_str());
@@ -631,6 +880,17 @@ fn database_error(error: MongoError) -> LifecycleOperationRepositoryError {
     }
 }
 
+fn outbox_database_error(error: MongoError) -> LifecycleEventOutboxError {
+    LifecycleEventOutboxError::new(error.to_string())
+}
+
+fn event_to_bson(
+    event: LifecycleOutboxEventDocument,
+) -> Result<Bson, LifecycleOperationRepositoryError> {
+    bson::to_bson(&event)
+        .map_err(|error| invalid_data(format!("failed to encode outbox event: {error}")))
+}
+
 fn is_duplicate_key(error: &MongoError) -> bool {
     matches!(
         error.kind.as_ref(),
@@ -673,6 +933,12 @@ mod tests {
         let operation = operation();
         let document = LifecycleOperationDocument::try_from(&operation).unwrap();
         assert_eq!(document.active_instance_id.as_deref(), Some("test"));
+        assert_eq!(document.event_version, Some(0));
+        assert_eq!(document.outbox.len(), 1);
+        assert_eq!(
+            document.outbox[0].event_id,
+            format!("lifecycle-operation:{}:0", operation.id())
+        );
 
         let restored = LifecycleOperation::try_from(document).unwrap();
         assert_eq!(restored, operation);
@@ -700,6 +966,15 @@ mod tests {
         let operation = operation();
         let mut document = LifecycleOperationDocument::try_from(&operation).unwrap();
         document.active_instance_id = None;
+        assert!(LifecycleOperation::try_from(document).is_err());
+    }
+
+    #[test]
+    fn rejects_event_marker_ahead_of_canonical_version() {
+        let operation = operation();
+        let mut document = LifecycleOperationDocument::try_from(&operation).unwrap();
+        document.event_version = Some(1);
+
         assert!(LifecycleOperation::try_from(document).is_err());
     }
 }

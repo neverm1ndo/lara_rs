@@ -64,6 +64,7 @@ use crate::{
     server_instances::{
         self,
         application::{
+            lifecycle_events::{LifecycleEventDelivery, LifecycleEventOutbox},
             lifecycle_reconciliation::LifecycleReconciler,
             lifecycle_service::LifecycleOperationService,
             registry::InstanceRegistry,
@@ -71,6 +72,7 @@ use crate::{
         },
         infrastructure::{
             config_registry::ConfiguredInstanceRegistry,
+            lifecycle_event_dispatcher::LifecycleEventDispatcher,
             lifecycle_operation_repository::MongoLifecycleOperationRepository,
             lifecycle_operation_support::{
                 SystemLifecycleOperationClock, UuidLifecycleOperationIdGenerator,
@@ -80,6 +82,7 @@ use crate::{
             systemd_observer::{SystemdObservationTarget, SystemdObserverWorker},
             systemd_runtime::SystemdLifecycleRuntime,
         },
+        presentation::realtime::configure_socket_io,
     },
     shared::{
         config::{AppConfig, model::BackupCompression},
@@ -106,6 +109,9 @@ type BootstrapError = Box<dyn Error + Send + Sync>;
 const CURRENT_MFA_ENCRYPTION_KEY_VERSION: u32 = 1;
 const LIFECYCLE_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
 const LIFECYCLE_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(1);
+const LIFECYCLE_EVENT_INTERVAL: Duration = Duration::from_millis(250);
+const LIFECYCLE_EVENT_LEASE: Duration = Duration::from_secs(30);
+const LIFECYCLE_EVENT_BATCH_SIZE: usize = 100;
 
 pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let bind_address = config.server.bind_address;
@@ -113,6 +119,11 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let maintenance = tokio::spawn(application.maintenance_worker.run(shutdown_rx.clone()));
+    let lifecycle_events = tokio::spawn(
+        application
+            .lifecycle_event_dispatcher
+            .run(shutdown_rx.clone()),
+    );
     let lifecycle_reconciliation = application
         .lifecycle_reconciliation
         .map(|worker| tokio::spawn(worker.run(shutdown_rx.clone())));
@@ -126,6 +137,7 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
         .await;
     let _ = shutdown_tx.send(true);
     maintenance.await?;
+    lifecycle_events.await?;
     if let Some(observer) = systemd_observer {
         observer.await?;
     }
@@ -141,6 +153,7 @@ struct BuiltApplication {
     maintenance_worker: BackupMaintenanceWorker,
     systemd_observer: Option<SystemdObserverWorker>,
     lifecycle_reconciliation: Option<LifecycleReconciliationWorker>,
+    lifecycle_event_dispatcher: LifecycleEventDispatcher,
 }
 
 async fn build_application(config: AppConfig) -> Result<BuiltApplication, BootstrapError> {
@@ -206,6 +219,11 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         mongo_database.clone(),
     ));
     lifecycle_operations.ensure_indexes().await?;
+    let recovered_events = lifecycle_operations.recover_missing_events().await?;
+    if recovered_events > 0 {
+        info!(recovered_events, "recovered lifecycle outbox events");
+    }
+    let lifecycle_event_outbox: Arc<dyn LifecycleEventOutbox> = lifecycle_operations.clone();
     let lifecycle_runtime = Arc::new(SystemdLifecycleRuntime::from_registry(
         instance_registry.as_ref(),
     ));
@@ -343,12 +361,25 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let login_users = SeaOrmLoginUserRepository::new(mysql);
     let session_protection: Arc<dyn SessionProtectionPolicy> =
         Arc::new(MfaSessionProtectionPolicy::new(Arc::clone(&mfa_factors)));
-    let authenticator = JwtAuthenticationService::with_protection_policy(
+    let authenticator: Arc<
+        dyn crate::auth::application::authenticate_jwt::AuthenticateBearerToken,
+    > = Arc::new(JwtAuthenticationService::with_protection_policy(
         verifier,
         sessions.clone(),
         authenticated_users.clone(),
         session_protection,
-    );
+    ));
+    let (socket_io_layer, socket_delivery) = configure_socket_io(authenticator.clone());
+    let lifecycle_event_delivery: Arc<dyn LifecycleEventDelivery> = socket_delivery;
+    let lifecycle_event_dispatcher = LifecycleEventDispatcher::new(
+        lifecycle_event_outbox,
+        lifecycle_event_delivery.clone(),
+        LIFECYCLE_EVENT_INTERVAL,
+        LIFECYCLE_EVENT_LEASE,
+        LIFECYCLE_EVENT_BATCH_SIZE,
+    )?;
+    let systemd_observer =
+        systemd_observer.map(|worker| worker.with_event_delivery(lifecycle_event_delivery));
     let get_user_service = GetUserService::new(user_profiles);
     let session_issuer = AuthenticatedSessionIssuer::new(
         sessions.clone(),
@@ -411,10 +442,13 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         .split_for_parts();
 
     Ok(BuiltApplication {
-        router: router.merge(auth::presentation::openapi_router(openapi)),
+        router: router
+            .merge(auth::presentation::openapi_router(openapi))
+            .layer(socket_io_layer),
         maintenance_worker,
         systemd_observer,
         lifecycle_reconciliation,
+        lifecycle_event_dispatcher,
     })
 }
 
