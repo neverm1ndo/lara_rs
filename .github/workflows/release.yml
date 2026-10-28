@@ -93,22 +93,50 @@ jobs:
             | tar -tf - \
             | sed 's#^\./##' > /tmp/lara-package-files
 
+          grep -Fx 'usr/bin/lara' /tmp/lara-package-files
           grep -Fx 'usr/bin/lara-rs' /tmp/lara-package-files
           grep -Fx 'usr/share/lara-rs/config/default.toml' /tmp/lara-package-files
+          grep -Fx 'usr/share/lara-rs/examples/lara.env.example' /tmp/lara-package-files
+          grep -Fx 'usr/share/lara-rs/examples/game-instance.env.example' /tmp/lara-package-files
+          grep -Fx 'usr/share/lara-rs/examples/game-instance.override.conf.example' /tmp/lara-package-files
+          grep -Fx 'usr/share/lara-rs/examples/production.toml.example' /tmp/lara-package-files
           grep -Fx 'usr/lib/lara-rs/verify-pilot' /tmp/lara-package-files
-          grep -Fx 'usr/share/doc/lara-rs/examples/production.toml.example' /tmp/lara-package-files
+          grep -Fx 'usr/lib/lara-rs/smoke-release-b' /tmp/lara-package-files
           grep -Fx 'usr/share/doc/lara-rs/changelog.Debian.gz' /tmp/lara-package-files
+          if grep -Eq '^usr/share/doc/lara-rs/examples/' /tmp/lara-package-files; then
+            echo "operational examples must not be installed below /usr/share/doc" >&2
+            exit 1
+          fi
           grep -Eq '^(usr/)?lib/systemd/system/lara-rs\.service$' /tmp/lara-package-files
           grep -Eq '^(usr/)?lib/systemd/system/lara-game@\.service$' /tmp/lara-package-files
+          grep -Fx 'usr/share/polkit-1/rules.d/49-lara-rs.rules' /tmp/lara-package-files
 
           lintian --fail-on error "$package"
           apt-get install -y "./$package"
-          test -x /usr/bin/lara-rs
+          test -x /usr/bin/lara
+          test -L /usr/bin/lara-rs
+          test "$(readlink /usr/bin/lara-rs)" = "lara"
+          /usr/bin/lara --version
+          /usr/bin/lara --help
+          /usr/bin/lara completions bash > /tmp/lara.bash
+          grep -q 'doctor' /tmp/lara.bash
+          grep -q 'render-systemd' /tmp/lara.bash
+          /usr/bin/lara-rs --version
           test -x /usr/lib/lara-rs/verify-pilot
+          test -x /usr/lib/lara-rs/smoke-release-b
+          sh -n /usr/lib/lara-rs/smoke-release-b
           getent passwd lara
           getent passwd lara-game
+          test "$(getent passwd lara | cut -d: -f6)" = "/var/lib/lara"
+          test "$(getent passwd lara-game | cut -d: -f6)" = "/var/lib/lara-game"
           test "$(stat -c '%U:%G:%a' /etc/lara)" = "root:lara:750"
           test "$(stat -c '%U:%G:%a' /var/lib/lara)" = "lara:lara:750"
+          test "$(stat -c '%U:%G:%a' /var/lib/lara-game)" = "lara-game:lara-game:750"
+          test -r /usr/share/lara-rs/examples/lara.env.example
+          test -r /usr/share/lara-rs/examples/game-instance.env.example
+          test -r /usr/share/lara-rs/examples/game-instance.override.conf.example
+          cmp deploy/polkit/49-lara-rs.rules /usr/share/polkit-1/rules.d/49-lara-rs.rules
+          test -r /usr/share/lara-rs/examples/production.toml.example
           systemd-analyze verify /lib/systemd/system/lara-rs.service
 
           install -d -o lara-game -g lara-game -m 0770 /srv/openmp/package-check

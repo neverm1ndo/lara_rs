@@ -1,0 +1,500 @@
+use std::path::PathBuf;
+
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+
+/// Lara game-server control plane and administration CLI.
+#[derive(Debug, Parser)]
+#[command(
+    name = "lara",
+    version,
+    about,
+    long_about = None,
+    subcommand_required = true,
+    arg_required_else_help = true
+)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum Command {
+    /// Run the HTTP and realtime control-plane daemon.
+    Serve,
+    /// Initialize and validate Lara configuration files.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Inspect and safely edit the configured game-server registry.
+    Instance {
+        #[command(subcommand)]
+        command: InstanceCommand,
+    },
+    /// Run read-only deployment diagnostics across configuration and dependencies.
+    Doctor(DoctorArgs),
+    /// Generate shell completion scripts from the current CLI schema.
+    Completions(CompletionsArgs),
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct CompletionsArgs {
+    /// Shell whose completion syntax should be generated.
+    #[arg(value_enum)]
+    pub shell: CompletionShell,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum CompletionShell {
+    Bash,
+    Elvish,
+    Fish,
+    PowerShell,
+    Zsh,
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum InstanceCommand {
+    /// List the effective registry after applying daemon validation rules.
+    List(InstanceListArgs),
+    /// Register a systemd-managed auxiliary instance.
+    Add(InstanceAddArgs),
+    /// Edit mutable metadata of an auxiliary instance.
+    Edit(InstanceEditArgs),
+    /// Remove an auxiliary registration without deleting server files.
+    Remove(InstanceRemoveArgs),
+    /// Render the validated systemd drop-in for an auxiliary instance.
+    RenderSystemd(InstanceRenderSystemdArgs),
+    /// Verify host files and the effective systemd definition without lifecycle actions.
+    Verify(InstanceVerifyArgs),
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct InstanceConfigArgs {
+    /// Explicit production TOML overlay to read or update.
+    #[arg(long, default_value = "/etc/lara/production.toml")]
+    pub overlay_file: PathBuf,
+    /// Environment file used for the same validation as daemon startup.
+    #[arg(long, default_value = "/etc/lara/lara.env")]
+    pub environment_file: PathBuf,
+    /// Output format for automation or human operators.
+    #[arg(long, value_enum, default_value_t)]
+    pub output: OutputFormat,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct InstanceListArgs {
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct InstanceAddArgs {
+    /// Stable lowercase instance identifier used by APIs and systemd.
+    pub id: String,
+    /// Human-readable name shown in the control panel.
+    #[arg(long)]
+    pub display_name: String,
+    /// Runtime environment classification.
+    #[arg(long, value_enum, default_value_t)]
+    pub environment: InstanceEnvironmentArg,
+    /// Isolated root containing only this game server's resources.
+    #[arg(long)]
+    pub storage_root: PathBuf,
+    /// Enabled panel capabilities. May be repeated.
+    #[arg(long = "capability", value_enum, default_values_t = [
+        InstanceCapabilityArg::Overview,
+        InstanceCapabilityArg::Lifecycle,
+        InstanceCapabilityArg::Incidents,
+    ])]
+    pub capabilities: Vec<InstanceCapabilityArg>,
+    /// Stable navigation order in the client manifest.
+    #[arg(long, default_value_t = 100)]
+    pub sort_order: u32,
+    /// Override the default `lara-game@<id>.service` unit name.
+    #[arg(long)]
+    pub systemd_unit: Option<String>,
+    /// Show the validated mutation without changing the overlay.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct InstanceEditArgs {
+    /// Stable identifier of an existing auxiliary instance.
+    pub id: String,
+    #[arg(long)]
+    pub display_name: Option<String>,
+    #[arg(long, value_enum)]
+    pub environment: Option<InstanceEnvironmentArg>,
+    #[arg(long)]
+    pub storage_root: Option<PathBuf>,
+    /// Replace the complete capability set. May be repeated.
+    #[arg(long = "capability", value_enum)]
+    pub capabilities: Vec<InstanceCapabilityArg>,
+    #[arg(long)]
+    pub sort_order: Option<u32>,
+    #[arg(long)]
+    pub systemd_unit: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct InstanceRemoveArgs {
+    /// Stable identifier of an existing auxiliary instance.
+    pub id: String,
+    /// Confirm removal of the registry entry. Server files remain untouched.
+    #[arg(long)]
+    pub yes: bool,
+    /// Show the validated mutation without changing the overlay.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct InstanceRenderSystemdArgs {
+    /// Stable identifier of a registered systemd-managed auxiliary instance.
+    pub id: String,
+    /// Absolute game-server executable; defaults to <storage-root>/omp-server.
+    #[arg(long)]
+    pub executable: Option<PathBuf>,
+    /// Unix account used by the game-server process.
+    #[arg(long, default_value = "lara-game")]
+    pub user: String,
+    /// Unix group used by the game-server process.
+    #[arg(long, default_value = "lara-game")]
+    pub group: String,
+    /// Root containing host systemd units and instance drop-ins.
+    #[arg(long, default_value = "/etc/systemd/system")]
+    pub systemd_directory: PathBuf,
+    /// Directory for optional per-instance process environment files.
+    #[arg(long, default_value = "/etc/lara/game-instances")]
+    pub instance_environment_directory: PathBuf,
+    /// Show paths and generated content without changing the host.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Permit replacement of an existing non-identical drop-in after backup.
+    #[arg(long)]
+    pub yes: bool,
+    /// Write files without asking systemd to reload its unit definitions.
+    #[arg(long = "no-reload", action = ArgAction::SetFalse, default_value_t = true)]
+    pub reload: bool,
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct InstanceVerifyArgs {
+    /// Stable identifier of a registered systemd-managed auxiliary instance.
+    pub id: String,
+    /// Absolute game-server executable; defaults to <storage-root>/omp-server.
+    #[arg(long)]
+    pub executable: Option<PathBuf>,
+    /// Expected Unix account used by the game-server process.
+    #[arg(long, default_value = "lara-game")]
+    pub user: String,
+    /// Expected Unix group used by the game-server process.
+    #[arg(long, default_value = "lara-game")]
+    pub group: String,
+    /// Root containing host systemd units and instance drop-ins.
+    #[arg(long, default_value = "/etc/systemd/system")]
+    pub systemd_directory: PathBuf,
+    /// Directory for optional per-instance process environment files.
+    #[arg(long, default_value = "/etc/lara/game-instances")]
+    pub instance_environment_directory: PathBuf,
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct DoctorArgs {
+    /// Restrict instance checks to one registered auxiliary.
+    #[arg(long)]
+    pub instance: Option<String>,
+    /// Explicit production TOML overlay.
+    #[arg(long, default_value = "/etc/lara/production.toml")]
+    pub overlay_file: PathBuf,
+    /// Environment file containing secrets and connection strings.
+    #[arg(long, default_value = "/etc/lara/lara.env")]
+    pub environment_file: PathBuf,
+    /// Root containing host systemd units and instance drop-ins.
+    #[arg(long, default_value = "/etc/systemd/system")]
+    pub systemd_directory: PathBuf,
+    /// Directory for optional per-instance process environment files.
+    #[arg(long, default_value = "/etc/lara/game-instances")]
+    pub instance_environment_directory: PathBuf,
+    /// Expected Unix game-server account.
+    #[arg(long, default_value = "lara-game")]
+    pub user: String,
+    /// Expected Unix game-server group.
+    #[arg(long, default_value = "lara-game")]
+    pub group: String,
+    /// Installed least-privilege polkit rule to verify.
+    #[arg(long, default_value = "/usr/share/polkit-1/rules.d/49-lara-rs.rules")]
+    pub polkit_rule: PathBuf,
+    /// Timeout applied independently to each database check.
+    #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=60))]
+    pub database_timeout_seconds: u64,
+    /// Output format for automation or human operators.
+    #[arg(long, value_enum, default_value_t)]
+    pub output: OutputFormat,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum, PartialEq, Eq)]
+pub enum InstanceEnvironmentArg {
+    Production,
+    Development,
+    #[default]
+    Testing,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum InstanceCapabilityArg {
+    Overview,
+    Lifecycle,
+    Configuration,
+    Incidents,
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum ConfigCommand {
+    /// Create a safe production overlay and environment-file template.
+    Init(ConfigInitArgs),
+    /// Validate configuration exactly as the daemon would load it.
+    Validate(ConfigValidateArgs),
+    /// Print canonical operational paths without reading secrets.
+    Paths(ConfigPathsArgs),
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct ConfigInitArgs {
+    /// Directory containing Lara's host configuration.
+    #[arg(long, default_value = "/etc/lara")]
+    pub config_dir: PathBuf,
+    /// Show the mutation plan without writing any file.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Explicitly permit replacement of existing files after making backups.
+    #[arg(long)]
+    pub yes: bool,
+    /// Output format for automation or human operators.
+    #[arg(long, value_enum, default_value_t)]
+    pub output: OutputFormat,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct ConfigValidateArgs {
+    /// Explicit production TOML overlay.
+    #[arg(long, default_value = "/etc/lara/production.toml")]
+    pub overlay_file: PathBuf,
+    /// Environment file containing secrets and connection strings.
+    #[arg(long, default_value = "/etc/lara/lara.env")]
+    pub environment_file: PathBuf,
+    /// Output format for automation or human operators.
+    #[arg(long, value_enum, default_value_t)]
+    pub output: OutputFormat,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct ConfigPathsArgs {
+    /// Directory containing Lara's host configuration.
+    #[arg(long, default_value = "/etc/lara")]
+    pub config_dir: PathBuf,
+    /// Output format for automation or human operators.
+    #[arg(long, value_enum, default_value_t)]
+    pub output: OutputFormat,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum, PartialEq, Eq)]
+pub enum OutputFormat {
+    #[default]
+    Human,
+    Json,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, error::ErrorKind};
+
+    use super::*;
+
+    #[test]
+    fn requires_an_explicit_subcommand() {
+        let error = Cli::try_parse_from(["lara"]).unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+        assert!(error.to_string().contains("Usage: lara <COMMAND>"));
+    }
+
+    #[test]
+    fn parses_serve_for_the_canonical_name_and_compatibility_alias() {
+        for program in ["lara", "lara-rs"] {
+            let cli = Cli::try_parse_from([program, "serve"]).unwrap();
+            assert_eq!(cli.command, Command::Serve);
+        }
+    }
+
+    #[test]
+    fn parses_nested_config_commands_and_safe_flags() {
+        let cli = Cli::try_parse_from([
+            "lara",
+            "config",
+            "init",
+            "--config-dir",
+            "/tmp/lara",
+            "--dry-run",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+
+        assert_eq!(
+            cli.command,
+            Command::Config {
+                command: ConfigCommand::Init(ConfigInitArgs {
+                    config_dir: PathBuf::from("/tmp/lara"),
+                    dry_run: true,
+                    yes: false,
+                    output: OutputFormat::Json,
+                })
+            }
+        );
+    }
+
+    #[test]
+    fn publishes_package_version_and_only_implemented_commands() {
+        let command = Cli::command();
+
+        assert_eq!(command.get_name(), "lara");
+        assert_eq!(command.get_version(), Some(env!("CARGO_PKG_VERSION")));
+        assert_eq!(
+            command
+                .get_subcommands()
+                .map(clap::Command::get_name)
+                .collect::<Vec<_>>(),
+            ["serve", "config", "instance", "doctor", "completions"]
+        );
+    }
+
+    #[test]
+    fn parses_instance_add_with_optional_configuration_capability() {
+        let cli = Cli::try_parse_from([
+            "lara",
+            "instance",
+            "add",
+            "test",
+            "--display-name",
+            "Test server",
+            "--storage-root",
+            "/home/svr_test",
+            "--capability",
+            "lifecycle",
+            "--capability",
+            "configuration",
+            "--dry-run",
+        ])
+        .unwrap();
+
+        let Command::Instance {
+            command: InstanceCommand::Add(args),
+        } = cli.command
+        else {
+            panic!("expected instance add command")
+        };
+        assert_eq!(args.id, "test");
+        assert_eq!(args.storage_root, PathBuf::from("/home/svr_test"));
+        assert_eq!(
+            args.capabilities,
+            [
+                InstanceCapabilityArg::Lifecycle,
+                InstanceCapabilityArg::Configuration
+            ]
+        );
+        assert!(args.dry_run);
+    }
+
+    #[test]
+    fn parses_systemd_render_without_implicit_lifecycle_action() {
+        let cli = Cli::try_parse_from([
+            "lara",
+            "instance",
+            "render-systemd",
+            "test",
+            "--executable",
+            "/home/svr_test/omp-server",
+            "--dry-run",
+            "--no-reload",
+        ])
+        .unwrap();
+
+        let Command::Instance {
+            command: InstanceCommand::RenderSystemd(args),
+        } = cli.command
+        else {
+            panic!("expected instance render-systemd command")
+        };
+        assert_eq!(args.id, "test");
+        assert!(args.dry_run);
+        assert!(!args.reload);
+        assert!(!args.yes);
+    }
+
+    #[test]
+    fn parses_read_only_instance_verification() {
+        let cli = Cli::try_parse_from(["lara", "instance", "verify", "test", "--output", "json"])
+            .unwrap();
+
+        let Command::Instance {
+            command: InstanceCommand::Verify(args),
+        } = cli.command
+        else {
+            panic!("expected instance verify command")
+        };
+        assert_eq!(args.id, "test");
+        assert_eq!(args.config.output, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_scoped_doctor_with_bounded_database_timeout() {
+        let cli = Cli::try_parse_from([
+            "lara",
+            "doctor",
+            "--instance",
+            "test",
+            "--database-timeout-seconds",
+            "10",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+
+        let Command::Doctor(args) = cli.command else {
+            panic!("expected doctor command")
+        };
+        assert_eq!(args.instance.as_deref(), Some("test"));
+        assert_eq!(args.database_timeout_seconds, 10);
+        assert_eq!(args.output, OutputFormat::Json);
+    }
+
+    #[test]
+    fn parses_completion_shell_as_an_explicit_value() {
+        let cli = Cli::try_parse_from(["lara", "completions", "zsh"]).unwrap();
+
+        assert_eq!(
+            cli.command,
+            Command::Completions(CompletionsArgs {
+                shell: CompletionShell::Zsh,
+            })
+        );
+    }
+}

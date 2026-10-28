@@ -1,29 +1,47 @@
 # Пилотный игровой инстанс под systemd
 
-Этот пакет закрывает инфраструктурную часть шага 6 Release A. Он предназначен
-для одного auxiliary-инстанса. Primary на этом этапе автоматически не
-мигрируется, а Lara не получает права `StartUnit`, `StopUnit` или `RestartUnit`.
+Документ начинался как инструкция пилота Release A, а теперь описывает
+эксплуатационный контур Release B для нескольких auxiliary-инстансов. Primary
+автоматически не мигрируется. Lara получает только узкие polkit-разрешения на
+`StartUnit`, `StopUnit` и `RestartUnit` для шаблона `lara-game@*.service`.
 
 ## Установка Debian-пакета Lara
 
 Release artifact рассчитан на Debian 12 (`amd64`). Пакет устанавливает бинарник,
-`lara-rs.service`, шаблон `lara-game@.service`, примеры конфигурации и утилиту
-`/usr/lib/lara-rs/verify-pilot`. Сервис намеренно не запускается и не включается
-автоматически: сначала администратор должен добавить production-конфигурацию и
-секреты.
+`lara-rs.service`, шаблон `lara-game@.service`, минимальное polkit-правило,
+примеры конфигурации и утилиты `/usr/lib/lara-rs/verify-pilot` и
+`/usr/lib/lara-rs/smoke-release-b`. Сервис намеренно не запускается и не
+включается автоматически: сначала администратор должен добавить
+production-конфигурацию и секреты.
+
+Канонический executable — `/usr/bin/lara`; systemd запускает `lara serve`.
+`/usr/bin/lara-rs` временно сохраняется как совместимый alias. Запуск `lara`
+без подкоманды показывает справку и не запускает daemon.
+
+Completion-скрипты генерируются из текущей CLI-схемы. Например, для Bash:
+
+```sh
+sudo install -d -o root -g root -m 0755 /usr/share/bash-completion/completions
+lara completions bash | sudo tee /usr/share/bash-completion/completions/lara >/dev/null
+```
+
+Поддерживаются `bash`, `elvish`, `fish`, `powershell` и `zsh`. Команда только
+пишет скрипт в stdout и не читает production-конфигурацию.
 
 ```sh
 sudo apt install ./lara-rs_0.2.2-1_amd64.deb
 
-sudo install -o root -g lara -m 0640 \
-  /usr/share/doc/lara-rs/examples/lara.env.example \
-  /etc/lara/lara.env
-sudo install -o root -g lara -m 0640 \
-  /usr/share/doc/lara-rs/examples/production.toml.example \
-  /etc/lara/production.toml
+sudo lara config init --dry-run
+sudo lara config init
 ```
 
-В `/etc/lara/lara.env` необходимо задать реальные секреты и раскомментировать:
+Команда использует встроенные в тот же бинарник шаблоны, поэтому не зависит от
+наличия `/usr/share/doc`. Она не запускает сервис и не заменяет существующие
+файлы без явного `--yes`; перед разрешённой заменой создаются timestamped
+backup-файлы. Для автоматизации доступен `--output json`.
+
+В `/etc/lara/lara.env` необходимо заменить placeholder-секреты. Путь overlay
+уже указан как:
 
 ```text
 LARA_CONFIG_FILE=/etc/lara/production.toml
@@ -32,11 +50,35 @@ LARA_CONFIG_FILE=/etc/lara/production.toml
 После проверки путей, реквизитов баз данных и списка инстансов:
 
 ```sh
+sudo lara config validate
+lara config paths
 sudo systemd-analyze verify /lib/systemd/system/lara-rs.service
 sudo systemctl enable --now lara-rs.service
 sudo systemctl --no-pager --full status lara-rs.service
 sudo journalctl -u lara-rs.service -n 100 --no-pager
 ```
+
+Общая read-only диагностика выполняется до запуска сервиса и после каждого
+изменения host-конфигурации:
+
+```sh
+sudo lara doctor
+sudo lara doctor --instance dev-dm --output json
+```
+
+`doctor` независимо проверяет startup-конфигурацию, registry, MySQL/MongoDB с
+ограниченным timeout, storage roots, packaged polkit rule, результаты
+`instance verify` и Linux `/proc` cgroup каждого найденного процесса. Совпавший
+executable вне ожидаемого `lara-game@<id>.service` считается blocking failure,
+так как обычно означает оставшийся bash/Node supervisor. Проверка не выполняет
+lifecycle-команды и не исправляет найденные проблемы.
+
+Polkit разрешает пользователю `lara` только `start`, `stop` и `restart` unit с
+именем `lara-game@<valid-id>.service`. Управление произвольными unit, reload
+daemon, enable/disable и изменение unit-файлов этим правилом не разрешаются.
+Статическая целостность правила проверяется автоматически; его эффективную
+авторизацию необходимо подтвердить Linux integration test под пользователем
+`lara`.
 
 Package upgrade сохраняет `/etc/lara` и `/var/lib/lara` и не удаляет системных
 пользователей. Package removal также не удаляет пользовательские данные.
@@ -84,9 +126,12 @@ Package upgrade сохраняет `/etc/lara` и `/var/lib/lara` и не уда
 
 ```sh
 getent group lara-game >/dev/null || sudo groupadd --system lara-game
+sudo install -d -o root -g root -m 0755 /var/lib/lara-game
 id -u lara-game >/dev/null 2>&1 || \
-  sudo useradd --system --gid lara-game --home-dir /nonexistent \
+  sudo useradd --system --gid lara-game --home-dir /var/lib/lara-game \
     --shell /usr/sbin/nologin lara-game
+sudo chown lara-game:lara-game /var/lib/lara-game
+sudo chmod 0750 /var/lib/lara-game
 
 # Debian-пакет уже устанавливает шаблон. При развёртывании напрямую из
 # исходников используйте вместо него:
@@ -134,8 +179,83 @@ port, рабочий каталог и cgroup выбранного unit.
 
 ## Регистрация в Lara
 
-Production overlay должен содержать как primary, так и auxiliary: массив
-`game_server.instances` заменяется целиком.
+Реестр теперь безопасно редактируется тем же бинарником. Первый `instance add`
+автоматически материализует external primary из действующей конфигурации,
+сохраняет остальные TOML-комментарии и добавляет только auxiliary:
+
+```sh
+sudo lara instance add dev-dm \
+  --display-name "Developer DM" \
+  --environment development \
+  --storage-root /home/svr_dm \
+  --capability overview \
+  --capability lifecycle \
+  --capability configuration \
+  --capability incidents \
+  --sort-order 20 \
+  --dry-run
+
+# Повторить без --dry-run после проверки плана.
+sudo lara instance add dev-dm \
+  --display-name "Developer DM" \
+  --environment development \
+  --storage-root /home/svr_dm \
+  --capability overview \
+  --capability lifecycle \
+  --capability configuration \
+  --capability incidents \
+  --sort-order 20
+
+sudo lara instance list
+```
+
+`instance edit` заменяет только явно переданные поля. Если указан хотя бы один
+`--capability`, переданный набор заменяет прежний целиком. `instance remove`
+требует `--yes`; он удаляет только регистрацию и никогда не удаляет storage
+root, его содержимое, drop-in или запущенный процесс. Каждая запись overlay
+проверяется полным startup-валидатором, выполняется под file lock, создаёт
+timestamped backup и устанавливается atomic rename.
+
+После регистрации drop-in можно сначала проверить, а затем установить отдельной
+командой:
+
+```sh
+sudo lara instance render-systemd dev-dm --dry-run
+sudo lara instance render-systemd dev-dm
+```
+
+Команда проверяет, что storage root существует, не является symlink, а
+`omp-server` — обычный исполняемый файл внутри этого root. Для нестандартного
+имени используются `--executable`, `--user` и `--group`. Путь под `/home`
+автоматически получает `ProtectHome=no`; для остальных путей сохраняется
+`ProtectHome=yes`. В обоих случаях `ReadWritePaths` ограничен единственным
+storage root.
+
+Drop-in устанавливается с режимом `0644`. При замене требуется `--yes` и
+создаётся backup. После изменения Lara вызывает manager `Reload` через systemd
+D-Bus; для подготовки offline image предусмотрен `--no-reload`. Команда не
+вызывает `enable`, `start`, `stop`, не создаёт environment-файл и не меняет
+владельцев игровых ресурсов. Ожидаемый необязательный environment-файл и план
+ACL возвращаются в human/JSON output.
+
+До cutover выполните read-only сверку host и effective unit:
+
+```sh
+sudo lara instance verify dev-dm
+sudo lara instance verify dev-dm --output json
+```
+
+Проверяются регистрация, root и executable, Unix identity, точное содержимое и
+режим drop-in, приватность необязательного environment-файла, а также
+загруженные systemd свойства `WorkingDirectory`, `ExecStart`, `User`, `Group`,
+`ProtectHome` и `ReadWritePaths`. Текущее `inactive/dead` состояние до cutover
+допустимо и выводится как информация. Отсутствующий необязательный
+environment-файл даёт warning; drift, недоступный D-Bus или небезопасные права
+дают ненулевой exit code. Команда может загрузить метаданные unit в manager для
+чтения, но не ставит lifecycle job и не изменяет файлы.
+
+Эквивалентная ручная форма production overlay содержит как primary, так и
+auxiliary: массив `game_server.instances` заменяется целиком.
 
 ```toml
 [game_server]
@@ -147,7 +267,7 @@ display_name = "Main server"
 kind = "primary"
 environment = "production"
 sort_order = 10
-systemd_unit = "lara-game@main.service"
+management = "external"
 capabilities = [
     "overview",
     "lifecycle",
@@ -158,7 +278,6 @@ capabilities = [
 ]
 readiness = "uds"
 incident_tracking = true
-systemd_observation = false
 
 [[game_server.instances]]
 id = "dev-dm"
@@ -166,12 +285,12 @@ display_name = "Developer DM"
 kind = "auxiliary"
 environment = "development"
 sort_order = 20
+management = "systemd"
 systemd_unit = "lara-game@dev-dm.service"
 storage_root = "/srv/openmp/dev-dm"
 capabilities = ["overview", "lifecycle", "configuration", "incidents"]
 readiness = "process"
 incident_tracking = true
-systemd_observation = true
 ```
 
 После изменения overlay перезапустите Lara и проверьте Developer manifest.
@@ -181,6 +300,23 @@ systemd_observation = true
 
 ## Acceptance checklist
 
+После настройки и запуска Lara итоговый read-only smoke-тест объединяет
+проверку пакета, CLI, production-конфигурации, registry, systemd unit, `doctor`
+и эффективной polkit-авторизации:
+
+```sh
+sudo /usr/lib/lara-rs/smoke-release-b dev-dm
+```
+
+Для нестандартного имени unit передайте его вторым аргументом. Скрипт требует
+запущенный `lara-rs.service`, но не выполняет lifecycle-команды, `daemon-reload`
+и не изменяет host-конфигурацию. Проверка polkit использует identity реального
+процесса Lara: разрешение `start` проверяется только как authorization query;
+сам unit не запускается. Отдельно обязательно подтверждаются отказы для
+постороннего unit и неподдерживаемого verb. Любой blocking failure завершает
+скрипт с ненулевым кодом.
+
+- `sudo lara instance verify dev-dm` завершается без blocking failures;
 - unit проходит `systemd-analyze verify`;
 - unit имеет состояния `active/running` и ненулевой `MainPID`;
 - `InvocationID` заполнен, `NRestarts` читается;

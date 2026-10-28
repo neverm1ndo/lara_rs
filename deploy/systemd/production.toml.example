@@ -11,7 +11,8 @@ display_name = "Main server"
 kind = "primary"
 environment = "production"
 sort_order = 10
-systemd_unit = "lara-game@main.service"
+# Keep primary external until its separately coordinated systemd migration.
+management = "external"
 capabilities = [
     "overview",
     "lifecycle",
@@ -22,7 +23,6 @@ capabilities = [
 ]
 readiness = "uds"
 incident_tracking = true
-systemd_observation = false
 
 [[game_server.instances]]
 id = "dev-dm"
@@ -30,12 +30,13 @@ display_name = "Developer DM"
 kind = "auxiliary"
 environment = "development"
 sort_order = 20
+# Systemd mode automatically enables D-Bus observation for this auxiliary.
+management = "systemd"
 systemd_unit = "lara-game@dev-dm.service"
 storage_root = "/srv/openmp/dev-dm"
 capabilities = ["overview", "lifecycle", "configuration", "incidents"]
 readiness = "process"
 incident_tracking = true
-systemd_observation = true
 
 [game_server.storage]
 root = "/srv/openmp/main"

@@ -8,7 +8,12 @@ use tracing::{debug, info, warn};
 use zbus::{Connection, Proxy, zvariant::OwnedObjectPath};
 
 use crate::server_instances::{
-    application::runtime_state::{RuntimeStateRepositoryError, RuntimeStateWriter},
+    application::{
+        lifecycle_events::{
+            LifecycleEventDelivery, ServerInstanceEvent, ServerInstanceStateChangedEvent,
+        },
+        runtime_state::{RuntimeStateRepositoryError, RuntimeStateWriter},
+    },
     domain::{
         InstanceReadiness, InstanceRuntimeState, ProcessState, ReadinessStatus, ServerInstanceId,
         TerminationEvidence, TerminationKind,
@@ -48,6 +53,7 @@ impl SystemdObservationTarget {
 pub struct SystemdObserverWorker {
     targets: Vec<SystemdObservationTarget>,
     states: Arc<dyn RuntimeStateWriter>,
+    events: Option<Arc<dyn LifecycleEventDelivery>>,
 }
 
 impl SystemdObserverWorker {
@@ -55,7 +61,16 @@ impl SystemdObserverWorker {
         targets: Vec<SystemdObservationTarget>,
         states: Arc<dyn RuntimeStateWriter>,
     ) -> Self {
-        Self { targets, states }
+        Self {
+            targets,
+            states,
+            events: None,
+        }
+    }
+
+    pub fn with_event_delivery(mut self, events: Arc<dyn LifecycleEventDelivery>) -> Self {
+        self.events = Some(events);
+        self
     }
 
     pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
@@ -70,9 +85,10 @@ impl SystemdObserverWorker {
         let mut tasks = tokio::task::JoinSet::new();
         for target in self.targets {
             let states = Arc::clone(&self.states);
+            let events = self.events.clone();
             let target_shutdown = shutdown.clone();
             tasks.spawn(async move {
-                observe_target(target, states, target_shutdown).await;
+                observe_target(target, states, events, target_shutdown).await;
             });
         }
 
@@ -91,6 +107,7 @@ impl SystemdObserverWorker {
 async fn observe_target(
     target: SystemdObservationTarget,
     states: Arc<dyn RuntimeStateWriter>,
+    events: Option<Arc<dyn LifecycleEventDelivery>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut last_state: Option<InstanceRuntimeState> = None;
@@ -100,18 +117,28 @@ async fn observe_target(
             return;
         }
 
-        let result = observe_connected(&target, &states, &mut shutdown, &mut last_state).await;
+        let result = observe_connected(
+            &target,
+            &states,
+            events.as_ref(),
+            &mut shutdown,
+            &mut last_state,
+        )
+        .await;
         match result {
             Ok(()) => return,
             Err(error) => {
-                if let Some(state) = last_state.clone()
-                    && let Err(store_error) = states.put(state.into_stale())
-                {
-                    warn!(
-                        instance_id = %target.instance_id,
-                        error = %store_error,
-                        "failed to mark systemd snapshot as stale"
-                    );
+                if let Some(state) = last_state.clone() {
+                    let stale = state.into_stale();
+                    if let Err(store_error) = states.put(stale.clone()) {
+                        warn!(
+                            instance_id = %target.instance_id,
+                            error = %store_error,
+                            "failed to mark systemd snapshot as stale"
+                        );
+                    } else {
+                        publish_state_event(events.as_ref(), &target, stale).await;
+                    }
                 }
                 warn!(
                     instance_id = %target.instance_id,
@@ -132,6 +159,7 @@ async fn observe_target(
 async fn observe_connected(
     target: &SystemdObservationTarget,
     states: &Arc<dyn RuntimeStateWriter>,
+    events: Option<&Arc<dyn LifecycleEventDelivery>>,
     shutdown: &mut watch::Receiver<bool>,
     last_state: &mut Option<InstanceRuntimeState>,
 ) -> Result<(), SystemdObserverError> {
@@ -156,7 +184,7 @@ async fn observe_connected(
     .await?;
     let mut changes = properties.receive_signal("PropertiesChanged").await?;
 
-    refresh(&connection, &path, target, states, last_state).await?;
+    refresh(&connection, &path, target, states, events, last_state).await?;
     let mut reconciliation = tokio::time::interval(RECONCILE_INTERVAL);
     reconciliation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     reconciliation.tick().await;
@@ -168,10 +196,10 @@ async fn observe_connected(
                 if change.is_none() {
                     return Err(SystemdObserverError::SignalStreamEnded);
                 }
-                refresh(&connection, &path, target, states, last_state).await?;
+                refresh(&connection, &path, target, states, events, last_state).await?;
             }
             _ = reconciliation.tick() => {
-                refresh(&connection, &path, target, states, last_state).await?;
+                refresh(&connection, &path, target, states, events, last_state).await?;
             }
         }
     }
@@ -182,6 +210,7 @@ async fn refresh(
     path: &OwnedObjectPath,
     target: &SystemdObservationTarget,
     states: &Arc<dyn RuntimeStateWriter>,
+    events: Option<&Arc<dyn LifecycleEventDelivery>>,
     last_state: &mut Option<InstanceRuntimeState>,
 ) -> Result<(), SystemdObserverError> {
     let observation = read_unit(connection, path).await?;
@@ -195,8 +224,45 @@ async fn refresh(
     );
     let state = observation.normalize(target, Utc::now());
     states.put(state.clone())?;
+    if last_state
+        .as_ref()
+        .is_none_or(|previous| runtime_state_changed(previous, &state))
+    {
+        publish_state_event(events, target, state.clone()).await;
+    }
     *last_state = Some(state);
     Ok(())
+}
+
+async fn publish_state_event(
+    events: Option<&Arc<dyn LifecycleEventDelivery>>,
+    target: &SystemdObservationTarget,
+    state: InstanceRuntimeState,
+) {
+    let Some(events) = events else {
+        return;
+    };
+    let event = ServerInstanceStateChangedEvent::new(state, target.readiness_mode, Utc::now());
+    if let Err(error) = events
+        .deliver(&ServerInstanceEvent::StateChanged(event))
+        .await
+    {
+        warn!(
+            instance_id = %target.instance_id,
+            error = %error,
+            "failed to publish realtime systemd state"
+        );
+    }
+}
+
+fn runtime_state_changed(previous: &InstanceRuntimeState, next: &InstanceRuntimeState) -> bool {
+    previous.process() != next.process()
+        || previous.readiness() != next.readiness()
+        || previous.observation() != next.observation()
+        || previous.main_pid() != next.main_pid()
+        || previous.restart_count() != next.restart_count()
+        || previous.invocation_id() != next.invocation_id()
+        || previous.last_termination() != next.last_termination()
 }
 
 async fn read_unit(

@@ -6,8 +6,8 @@ use crate::{
     server_instances::{
         application::registry::InstanceRegistry,
         domain::{
-            InstanceCapability, InstanceEnvironment, InstanceKind, InstanceReadiness,
-            ServerInstance, ServerInstanceId,
+            InstanceCapability, InstanceEnvironment, InstanceKind, InstanceManagement,
+            InstanceReadiness, ServerInstance, ServerInstanceId,
         },
     },
     shared::user_role::UserRole,
@@ -49,6 +49,7 @@ pub struct ManifestInstance {
     pub display_name: String,
     pub kind: InstanceKind,
     pub environment: InstanceEnvironment,
+    pub management: InstanceManagement,
     pub sort_order: u32,
     pub features: BTreeMap<FeatureId, FeatureAccess>,
     pub observability: ManifestObservability,
@@ -92,6 +93,9 @@ pub struct FeatureAccess {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FeaturePermission {
     Read,
+    Start,
+    Stop,
+    Restart,
     Write,
     UploadArtifact,
     Restore,
@@ -102,6 +106,9 @@ impl FeaturePermission {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
+            Self::Start => "start",
+            Self::Stop => "stop",
+            Self::Restart => "restart",
             Self::Write => "write",
             Self::UploadArtifact => "upload_artifact",
             Self::Restore => "restore",
@@ -151,7 +158,7 @@ fn project_instance(
         .capabilities()
         .iter()
         .filter_map(|capability| {
-            permissions_for(capability, subject, developer)
+            permissions_for(capability, subject, developer, instance.management())
                 .map(|access| (feature_id(capability), access))
         })
         .collect();
@@ -162,10 +169,11 @@ fn project_instance(
         display_name: instance.display_name().to_owned(),
         kind: instance.kind(),
         environment: instance.environment(),
+        management: instance.management(),
         sort_order: instance.sort_order(),
         features,
         observability: ManifestObservability {
-            process_monitoring: true,
+            process_monitoring: instance.management() == InstanceManagement::Systemd,
             readiness: observability.readiness(),
             incident_tracking: observability.incident_tracking(),
         },
@@ -176,9 +184,18 @@ fn permissions_for(
     capability: InstanceCapability,
     subject: &ManifestSubject,
     developer: bool,
+    management: InstanceManagement,
 ) -> Option<FeatureAccess> {
     let permissions = match capability {
         InstanceCapability::Overview => vec![FeaturePermission::Read],
+        InstanceCapability::Lifecycle if developer && management == InstanceManagement::Systemd => {
+            vec![
+                FeaturePermission::Read,
+                FeaturePermission::Start,
+                FeaturePermission::Stop,
+                FeaturePermission::Restart,
+            ]
+        }
         InstanceCapability::Lifecycle if developer => vec![FeaturePermission::Read],
         InstanceCapability::Configuration if developer => vec![
             FeaturePermission::Read,
@@ -221,7 +238,10 @@ fn revision(manifest: &InstanceManifest) -> String {
     for instance in &manifest.instances {
         digest.update(instance.id.as_str());
         digest.update(instance.display_name.as_bytes());
-        digest.update(format!("{:?}{:?}", instance.kind, instance.environment));
+        digest.update(format!(
+            "{:?}{:?}{:?}",
+            instance.kind, instance.environment, instance.management
+        ));
         digest.update(instance.sort_order.to_be_bytes());
         digest.update(format!("{:?}", instance.observability));
         for (feature, access) in &instance.features {
@@ -243,7 +263,9 @@ fn revision(manifest: &InstanceManifest) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::server_instances::domain::{InstanceCapabilities, InstanceObservability};
+    use crate::server_instances::domain::{
+        InstanceCapabilities, InstanceClassification, InstanceManagement, InstanceObservability,
+    };
 
     struct MemoryRegistry {
         instances: Vec<ServerInstance>,
@@ -267,8 +289,11 @@ mod tests {
         ServerInstance::new(
             ServerInstanceId::new("main").unwrap(),
             "Main",
-            InstanceKind::Primary,
-            InstanceEnvironment::Production,
+            InstanceClassification::new(
+                InstanceKind::Primary,
+                InstanceEnvironment::Production,
+                InstanceManagement::External,
+            ),
             10,
             InstanceCapabilities::primary(),
             InstanceObservability::new(InstanceReadiness::Uds, true),
@@ -280,8 +305,11 @@ mod tests {
         ServerInstance::new(
             ServerInstanceId::new("dev-dm").unwrap(),
             "Developer DM",
-            InstanceKind::Auxiliary,
-            InstanceEnvironment::Development,
+            InstanceClassification::new(
+                InstanceKind::Auxiliary,
+                InstanceEnvironment::Development,
+                InstanceManagement::Systemd,
+            ),
             20,
             InstanceCapabilities::new([
                 InstanceCapability::Overview,
@@ -313,7 +341,12 @@ mod tests {
         assert_eq!(manifest.instances[1].features.len(), 4);
         assert_eq!(
             manifest.instances[1].features[&FeatureId::Lifecycle].permissions,
-            [FeaturePermission::Read]
+            [
+                FeaturePermission::Read,
+                FeaturePermission::Start,
+                FeaturePermission::Stop,
+                FeaturePermission::Restart,
+            ]
         );
         assert!(
             !manifest.instances[1]

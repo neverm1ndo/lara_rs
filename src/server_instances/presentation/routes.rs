@@ -11,4 +11,7 @@ where
     OpenApiRouter::new()
         .routes(routes!(handlers::get_manifest))
         .routes(routes!(handlers::get_runtime_state))
+        .routes(routes!(handlers::create_lifecycle_operation))
+        .routes(routes!(handlers::list_lifecycle_operations))
+        .routes(routes!(handlers::get_lifecycle_operation))
 }

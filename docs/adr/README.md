@@ -15,3 +15,4 @@
 ## Индекс
 
 - [ADR-0001: Control plane для нескольких игровых инстансов](0001-server-instance-control-plane.md)
+- [ADR-0002: Release B — управление lifecycle и единый CLI](0002-release-b-lifecycle-and-cli.md)

@@ -18,14 +18,15 @@ use crate::{
     },
     server_instances::{
         application::{
+            lifecycle_service::LifecycleOperationService,
             registry::InstanceRegistry,
             runtime_state::{RuntimeStateReader, RuntimeStateRepositoryError},
         },
         domain::{
-            InstanceCapabilities, InstanceCapability, InstanceEnvironment, InstanceKind,
-            InstanceObservability, InstanceReadiness, InstanceRuntimeState, ProcessState,
-            ReadinessStatus, ServerInstance, ServerInstanceId, TerminationEvidence,
-            TerminationKind,
+            InstanceCapabilities, InstanceCapability, InstanceClassification, InstanceEnvironment,
+            InstanceKind, InstanceManagement, InstanceObservability, InstanceReadiness,
+            InstanceRuntimeState, ProcessState, ReadinessStatus, ServerInstance, ServerInstanceId,
+            TerminationEvidence, TerminationKind,
         },
         presentation::{router, state::ServerInstancesState},
     },
@@ -107,6 +108,10 @@ impl ServerInstancesState for TestState {
     fn runtime_state_reader(&self) -> Arc<dyn RuntimeStateReader> {
         Arc::clone(&self.states)
     }
+
+    fn lifecycle_operation_service(&self) -> Arc<LifecycleOperationService> {
+        panic!("lifecycle endpoints use their dedicated application tests")
+    }
 }
 
 fn principal(main_group: UserRole, permissions: Vec<UserRole>) -> AuthenticatedPrincipal {
@@ -127,8 +132,11 @@ fn registry() -> Arc<dyn InstanceRegistry> {
     let primary = ServerInstance::new(
         ServerInstanceId::new("main").unwrap(),
         "Main server",
-        InstanceKind::Primary,
-        InstanceEnvironment::Production,
+        InstanceClassification::new(
+            InstanceKind::Primary,
+            InstanceEnvironment::Production,
+            InstanceManagement::External,
+        ),
         10,
         InstanceCapabilities::primary(),
         InstanceObservability::new(InstanceReadiness::Uds, true),
@@ -137,8 +145,11 @@ fn registry() -> Arc<dyn InstanceRegistry> {
     let auxiliary = ServerInstance::new(
         ServerInstanceId::new("dev-dm").unwrap(),
         "Developer DM",
-        InstanceKind::Auxiliary,
-        InstanceEnvironment::Development,
+        InstanceClassification::new(
+            InstanceKind::Auxiliary,
+            InstanceEnvironment::Development,
+            InstanceManagement::Systemd,
+        ),
         20,
         InstanceCapabilities::new([
             InstanceCapability::Overview,
@@ -218,13 +229,23 @@ async fn developer_receives_all_instances_without_internal_runtime_configuration
     assert_eq!(body["revision"], etag);
     assert_eq!(body["defaultInstanceId"], "main");
     assert_eq!(body["instances"].as_array().unwrap().len(), 2);
+    assert_eq!(body["instances"][0]["management"], "external");
+    assert_eq!(
+        body["instances"][0]["observability"]["processMonitoring"],
+        false
+    );
+    assert_eq!(body["instances"][1]["management"], "systemd");
+    assert_eq!(
+        body["instances"][1]["observability"]["processMonitoring"],
+        true
+    );
     assert_eq!(
         body["instances"][1]["observability"]["readiness"],
         "process"
     );
     assert_eq!(
         body["instances"][1]["features"]["lara.lifecycle.v1"]["permissions"],
-        serde_json::json!(["read"])
+        serde_json::json!(["read", "start", "stop", "restart"])
     );
     for forbidden in ["systemdUnit", "storageRoot", "udsPath"] {
         assert!(!body.to_string().contains(forbidden), "exposed {forbidden}");

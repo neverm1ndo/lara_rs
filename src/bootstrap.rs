@@ -64,14 +64,25 @@ use crate::{
     server_instances::{
         self,
         application::{
+            lifecycle_events::{LifecycleEventDelivery, LifecycleEventOutbox},
+            lifecycle_reconciliation::LifecycleReconciler,
+            lifecycle_service::LifecycleOperationService,
             registry::InstanceRegistry,
             runtime_state::{RuntimeStateReader, RuntimeStateWriter},
         },
         infrastructure::{
             config_registry::ConfiguredInstanceRegistry,
+            lifecycle_event_dispatcher::LifecycleEventDispatcher,
+            lifecycle_operation_repository::MongoLifecycleOperationRepository,
+            lifecycle_operation_support::{
+                SystemLifecycleOperationClock, UuidLifecycleOperationIdGenerator,
+            },
+            lifecycle_reconciliation_worker::LifecycleReconciliationWorker,
             runtime_state_store::InMemoryRuntimeStateStore,
             systemd_observer::{SystemdObservationTarget, SystemdObserverWorker},
+            systemd_runtime::SystemdLifecycleRuntime,
         },
+        presentation::realtime::configure_socket_io,
     },
     shared::{
         config::{AppConfig, model::BackupCompression},
@@ -96,6 +107,11 @@ use crate::{
 
 type BootstrapError = Box<dyn Error + Send + Sync>;
 const CURRENT_MFA_ENCRYPTION_KEY_VERSION: u32 = 1;
+const LIFECYCLE_OPERATION_TIMEOUT: Duration = Duration::from_secs(120);
+const LIFECYCLE_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(1);
+const LIFECYCLE_EVENT_INTERVAL: Duration = Duration::from_millis(250);
+const LIFECYCLE_EVENT_LEASE: Duration = Duration::from_secs(30);
+const LIFECYCLE_EVENT_BATCH_SIZE: usize = 100;
 
 pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let bind_address = config.server.bind_address;
@@ -103,6 +119,14 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let listener = tokio::net::TcpListener::bind(bind_address).await?;
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let maintenance = tokio::spawn(application.maintenance_worker.run(shutdown_rx.clone()));
+    let lifecycle_events = tokio::spawn(
+        application
+            .lifecycle_event_dispatcher
+            .run(shutdown_rx.clone()),
+    );
+    let lifecycle_reconciliation = application
+        .lifecycle_reconciliation
+        .map(|worker| tokio::spawn(worker.run(shutdown_rx.clone())));
     let systemd_observer = application
         .systemd_observer
         .map(|worker| tokio::spawn(worker.run(shutdown_rx)));
@@ -113,8 +137,12 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
         .await;
     let _ = shutdown_tx.send(true);
     maintenance.await?;
+    lifecycle_events.await?;
     if let Some(observer) = systemd_observer {
         observer.await?;
+    }
+    if let Some(reconciliation) = lifecycle_reconciliation {
+        reconciliation.await?;
     }
     server_result?;
     Ok(())
@@ -124,20 +152,27 @@ struct BuiltApplication {
     router: Router,
     maintenance_worker: BackupMaintenanceWorker,
     systemd_observer: Option<SystemdObserverWorker>,
+    lifecycle_reconciliation: Option<LifecycleReconciliationWorker>,
+    lifecycle_event_dispatcher: LifecycleEventDispatcher,
 }
 
 async fn build_application(config: AppConfig) -> Result<BuiltApplication, BootstrapError> {
-    let instance_registry = ConfiguredInstanceRegistry::from_config(&config.game_server)?;
+    let instance_registry = Arc::new(ConfiguredInstanceRegistry::from_config(
+        &config.game_server,
+    )?);
     let runtime_states = Arc::new(InMemoryRuntimeStateStore::new());
     let runtime_state_reader: Arc<dyn RuntimeStateReader> = runtime_states.clone();
     let runtime_state_writer: Arc<dyn RuntimeStateWriter> = runtime_states;
     let observation_targets: Vec<_> = instance_registry
-        .observed()
+        .systemd_managed()
         .map(|configured| {
             let descriptor = configured.descriptor();
             SystemdObservationTarget::new(
                 descriptor.id().clone(),
-                configured.systemd_unit().as_str(),
+                configured
+                    .systemd_unit()
+                    .expect("systemd-managed instances have a validated unit")
+                    .as_str(),
                 descriptor.observability().readiness(),
             )
         })
@@ -179,6 +214,43 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     mfa_challenge_repository.ensure_indexes().await?;
     let mfa_factors: Arc<dyn MfaFactorRepository> = Arc::new(mfa_factor_repository);
     let mfa_challenges: Arc<dyn MfaChallengeRepository> = Arc::new(mfa_challenge_repository);
+
+    let lifecycle_operations = Arc::new(MongoLifecycleOperationRepository::new(
+        mongo_database.clone(),
+    ));
+    lifecycle_operations.ensure_indexes().await?;
+    let recovered_events = lifecycle_operations.recover_missing_events().await?;
+    if recovered_events > 0 {
+        info!(recovered_events, "recovered lifecycle outbox events");
+    }
+    let lifecycle_event_outbox: Arc<dyn LifecycleEventOutbox> = lifecycle_operations.clone();
+    let lifecycle_runtime = Arc::new(SystemdLifecycleRuntime::from_registry(
+        instance_registry.as_ref(),
+    ));
+    let registry_port: Arc<dyn InstanceRegistry> = instance_registry.clone();
+    let lifecycle_operation_service = Arc::new(LifecycleOperationService::new(
+        registry_port.clone(),
+        lifecycle_operations,
+        lifecycle_runtime,
+        runtime_state_reader.clone(),
+        Arc::new(SystemLifecycleOperationClock),
+        Arc::new(UuidLifecycleOperationIdGenerator),
+        LIFECYCLE_OPERATION_TIMEOUT,
+    )?);
+    let reconciliation_ids: Vec<_> = instance_registry
+        .systemd_managed()
+        .map(|configured| configured.descriptor().id().clone())
+        .collect();
+    let lifecycle_reconciliation = if reconciliation_ids.is_empty() {
+        None
+    } else {
+        let reconciler: Arc<dyn LifecycleReconciler> = lifecycle_operation_service.clone();
+        Some(LifecycleReconciliationWorker::new(
+            reconciliation_ids,
+            reconciler,
+            LIFECYCLE_RECONCILIATION_INTERVAL,
+        )?)
+    };
 
     let totp_secret_generator: Arc<dyn TotpSecretGenerator> = Arc::new(OsTotpSecretGenerator);
     let totp_cipher: Arc<dyn TotpSecretCipher> = Arc::new(Aes256GcmTotpSecretCipher::from_hex(
@@ -289,12 +361,25 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let login_users = SeaOrmLoginUserRepository::new(mysql);
     let session_protection: Arc<dyn SessionProtectionPolicy> =
         Arc::new(MfaSessionProtectionPolicy::new(Arc::clone(&mfa_factors)));
-    let authenticator = JwtAuthenticationService::with_protection_policy(
+    let authenticator: Arc<
+        dyn crate::auth::application::authenticate_jwt::AuthenticateBearerToken,
+    > = Arc::new(JwtAuthenticationService::with_protection_policy(
         verifier,
         sessions.clone(),
         authenticated_users.clone(),
         session_protection,
-    );
+    ));
+    let (socket_io_layer, socket_delivery) = configure_socket_io(authenticator.clone());
+    let lifecycle_event_delivery: Arc<dyn LifecycleEventDelivery> = socket_delivery;
+    let lifecycle_event_dispatcher = LifecycleEventDispatcher::new(
+        lifecycle_event_outbox,
+        lifecycle_event_delivery.clone(),
+        LIFECYCLE_EVENT_INTERVAL,
+        LIFECYCLE_EVENT_LEASE,
+        LIFECYCLE_EVENT_BATCH_SIZE,
+    )?;
+    let systemd_observer =
+        systemd_observer.map(|worker| worker.with_event_delivery(lifecycle_event_delivery));
     let get_user_service = GetUserService::new(user_profiles);
     let session_issuer = AuthenticatedSessionIssuer::new(
         sessions.clone(),
@@ -336,8 +421,9 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         mfa_login_service,
         mfa_management_service,
         get_user_service,
-        instance_registry,
+        registry_port,
         runtime_state_reader,
+        lifecycle_operation_service,
         configurator_directory,
         maps_file_service,
         maps_upload_limits,
@@ -356,9 +442,13 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         .split_for_parts();
 
     Ok(BuiltApplication {
-        router: router.merge(auth::presentation::openapi_router(openapi)),
+        router: router
+            .merge(auth::presentation::openapi_router(openapi))
+            .layer(socket_io_layer),
         maintenance_worker,
         systemd_observer,
+        lifecycle_reconciliation,
+        lifecycle_event_dispatcher,
     })
 }
 
@@ -396,7 +486,10 @@ mod tests {
         },
         maps::{application::file_service::MapsFileService, presentation::state::MapsState},
         server_instances::{
-            application::{registry::InstanceRegistry, runtime_state::RuntimeStateReader},
+            application::{
+                lifecycle_service::LifecycleOperationService, registry::InstanceRegistry,
+                runtime_state::RuntimeStateReader,
+            },
             presentation::state::ServerInstancesState,
         },
         shared::file_storage::upload::MultipartUploadLimits,
@@ -451,6 +544,10 @@ mod tests {
 
         fn runtime_state_reader(&self) -> Arc<dyn RuntimeStateReader> {
             panic!("documentation generation does not resolve application ports")
+        }
+
+        fn lifecycle_operation_service(&self) -> Arc<LifecycleOperationService> {
+            panic!("documentation generation does not resolve application services")
         }
     }
 

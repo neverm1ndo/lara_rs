@@ -1,0 +1,13 @@
+# Lara production overlay. The primary remains externally managed until its
+# separately coordinated systemd migration.
+
+[game_server]
+primary_instance = "main"
+
+[game_server.storage]
+root = "/srv/openmp/main"
+
+[backups.storage]
+directory = "/var/lib/lara/backups"
+
+# Add auxiliary instances with `lara instance add`; do not put secrets here.

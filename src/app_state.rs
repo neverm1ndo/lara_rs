@@ -12,7 +12,8 @@ use crate::{
     configuration::presentation::authorization::ConfigurationAuthorizationState,
     maps::{application::file_service::MapsFileService, presentation::state::MapsState},
     server_instances::application::{
-        registry::InstanceRegistry, runtime_state::RuntimeStateReader,
+        lifecycle_service::LifecycleOperationService, registry::InstanceRegistry,
+        runtime_state::RuntimeStateReader,
     },
     server_instances::presentation::state::ServerInstancesState,
     shared::file_storage::{path::RelativeStoragePath, upload::MultipartUploadLimits},
@@ -27,6 +28,7 @@ pub struct AppState {
     get_user_service: Arc<dyn GetUser>,
     instance_registry: Arc<dyn InstanceRegistry>,
     runtime_state_reader: Arc<dyn RuntimeStateReader>,
+    lifecycle_operation_service: Arc<LifecycleOperationService>,
     configurator_directory: RelativeStoragePath,
     maps_file_service: Arc<dyn MapsFileService>,
     maps_upload_limits: MultipartUploadLimits,
@@ -36,24 +38,26 @@ pub struct AppState {
 impl AppState {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        authenticator: impl AuthenticateBearerToken + 'static,
+        authenticator: Arc<dyn AuthenticateBearerToken>,
         mfa_login_service: impl MfaLogin + 'static,
         mfa_management_service: impl ManageMfa + 'static,
         get_user_service: impl GetUser + 'static,
-        instance_registry: impl InstanceRegistry + 'static,
+        instance_registry: Arc<dyn InstanceRegistry>,
         runtime_state_reader: Arc<dyn RuntimeStateReader>,
+        lifecycle_operation_service: Arc<LifecycleOperationService>,
         configurator_directory: RelativeStoragePath,
         maps_file_service: impl MapsFileService + 'static,
         maps_upload_limits: MultipartUploadLimits,
         backup_lifecycle_service: Arc<BackupLifecycleService>,
     ) -> Self {
         Self {
-            jwt_authenticator: Arc::new(authenticator),
+            jwt_authenticator: authenticator,
             mfa_login_service: Arc::new(mfa_login_service),
             mfa_management_service: Arc::new(mfa_management_service),
             get_user_service: Arc::new(get_user_service),
-            instance_registry: Arc::new(instance_registry),
+            instance_registry,
             runtime_state_reader,
+            lifecycle_operation_service,
             configurator_directory,
             maps_file_service: Arc::new(maps_file_service),
             maps_upload_limits,
@@ -69,6 +73,10 @@ impl ServerInstancesState for AppState {
 
     fn runtime_state_reader(&self) -> Arc<dyn RuntimeStateReader> {
         Arc::clone(&self.runtime_state_reader)
+    }
+
+    fn lifecycle_operation_service(&self) -> Arc<LifecycleOperationService> {
+        Arc::clone(&self.lifecycle_operation_service)
     }
 }
 

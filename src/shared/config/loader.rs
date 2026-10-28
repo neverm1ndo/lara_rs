@@ -61,56 +61,7 @@ impl AppConfig {
     /// built-in scalars, embedded default TOML, an explicitly selected TOML,
     /// deprecated environment names, and finally `LARA_*` variables.
     pub fn load() -> Result<Self, ConfigError> {
-        let mut builder = ::config::Config::builder()
-            .set_default("server.bind_address", DEFAULT_BIND_ADDRESS)?
-            .set_default("jwt.ttl_seconds", DEFAULT_JWT_TTL_SECONDS)?
-            .set_default("backups.storage.directory", DEFAULT_BACKUP_DIRECTORY)?
-            .set_default("backups.storage.compression", DEFAULT_BACKUP_COMPRESSION)?
-            .set_default(
-                "backups.storage.compression_level",
-                DEFAULT_BACKUP_COMPRESSION_LEVEL,
-            )?
-            .set_default(
-                "backups.storage.compression_threshold_bytes",
-                DEFAULT_BACKUP_COMPRESSION_THRESHOLD_BYTES,
-            )?
-            .set_default(
-                "backups.retention.lifetime_seconds",
-                DEFAULT_BACKUP_LIFETIME_SECONDS,
-            )?
-            .set_default(
-                "backups.retention.cleanup_interval_seconds",
-                DEFAULT_BACKUP_CLEANUP_INTERVAL_SECONDS,
-            )?
-            .set_default(
-                "backups.retention.cleanup_batch_size",
-                DEFAULT_BACKUP_CLEANUP_BATCH_SIZE,
-            )?
-            .set_default(
-                "backups.retention.max_concurrent_deletions",
-                DEFAULT_BACKUP_MAX_CONCURRENT_DELETIONS,
-            )?
-            .set_default(
-                "backups.retention.operation_lease_seconds",
-                DEFAULT_BACKUP_OPERATION_LEASE_SECONDS,
-            )?
-            .set_default(
-                "backups.retention.stale_preparation_seconds",
-                DEFAULT_BACKUP_STALE_PREPARATION_SECONDS,
-            )?
-            .set_default("backups.diff.enabled", DEFAULT_BACKUP_DIFF_ENABLED)?
-            .set_default(
-                "backups.diff.max_input_size_bytes",
-                DEFAULT_BACKUP_DIFF_MAX_INPUT_SIZE_BYTES,
-            )?
-            .set_default(
-                "backups.diff.generation_timeout_ms",
-                DEFAULT_BACKUP_DIFF_GENERATION_TIMEOUT_MS,
-            )?
-            // Keep the production binary independent from its current working
-            // directory. The committed, non-secret defaults are compiled into
-            // the executable; deployment files only override them.
-            .add_source(File::from_str(EMBEDDED_DEFAULT_CONFIG, FileFormat::Toml));
+        let mut builder = base_builder()?;
 
         if let Some(path) = nonempty_env(CONFIG_FILE_ENV) {
             tracing::info!(config_file = %path, "loading configuration overlay");
@@ -120,12 +71,114 @@ impl AppConfig {
         builder = apply_legacy_environment(builder)?;
         builder = builder.add_source(lara_environment(None));
 
-        let config = builder.build()?.try_deserialize::<Self>()?;
-        config.validate()?;
-        log_loaded_configuration(&config);
-        Ok(config)
+        deserialize_and_validate(builder)
     }
 
+    /// Loads a mandatory overlay and an environment-file projection before
+    /// applying the current process environment. This is used by the admin
+    /// CLI without mutating global environment variables.
+    pub fn load_explicit(
+        overlay: &Path,
+        environment: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, ConfigError> {
+        Self::load_explicit_source(
+            File::from(overlay).required(true),
+            environment.into_iter().collect(),
+        )
+    }
+
+    /// Validates an in-memory TOML overlay using the exact same defaults and
+    /// environment projection as daemon startup. Administrative mutations use
+    /// this before atomically replacing the host file.
+    pub fn load_explicit_toml(
+        overlay: &str,
+        environment: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, ConfigError> {
+        Self::load_explicit_source(
+            File::from_str(overlay, FileFormat::Toml),
+            environment.into_iter().collect(),
+        )
+    }
+
+    fn load_explicit_source<T>(
+        overlay: T,
+        environment: Map<String, String>,
+    ) -> Result<Self, ConfigError>
+    where
+        T: ::config::Source + Send + Sync + 'static,
+    {
+        let mut builder = base_builder()?
+            .add_source(overlay)
+            .add_source(lara_environment(Some(environment)));
+        builder = apply_legacy_environment(builder)?;
+        builder = builder.add_source(lara_environment(None));
+        deserialize_and_validate(builder)
+    }
+}
+
+fn base_builder() -> Result<ConfigBuilder<DefaultState>, ConfigError> {
+    Ok(::config::Config::builder()
+        .set_default("server.bind_address", DEFAULT_BIND_ADDRESS)?
+        .set_default("jwt.ttl_seconds", DEFAULT_JWT_TTL_SECONDS)?
+        .set_default("backups.storage.directory", DEFAULT_BACKUP_DIRECTORY)?
+        .set_default("backups.storage.compression", DEFAULT_BACKUP_COMPRESSION)?
+        .set_default(
+            "backups.storage.compression_level",
+            DEFAULT_BACKUP_COMPRESSION_LEVEL,
+        )?
+        .set_default(
+            "backups.storage.compression_threshold_bytes",
+            DEFAULT_BACKUP_COMPRESSION_THRESHOLD_BYTES,
+        )?
+        .set_default(
+            "backups.retention.lifetime_seconds",
+            DEFAULT_BACKUP_LIFETIME_SECONDS,
+        )?
+        .set_default(
+            "backups.retention.cleanup_interval_seconds",
+            DEFAULT_BACKUP_CLEANUP_INTERVAL_SECONDS,
+        )?
+        .set_default(
+            "backups.retention.cleanup_batch_size",
+            DEFAULT_BACKUP_CLEANUP_BATCH_SIZE,
+        )?
+        .set_default(
+            "backups.retention.max_concurrent_deletions",
+            DEFAULT_BACKUP_MAX_CONCURRENT_DELETIONS,
+        )?
+        .set_default(
+            "backups.retention.operation_lease_seconds",
+            DEFAULT_BACKUP_OPERATION_LEASE_SECONDS,
+        )?
+        .set_default(
+            "backups.retention.stale_preparation_seconds",
+            DEFAULT_BACKUP_STALE_PREPARATION_SECONDS,
+        )?
+        .set_default("backups.diff.enabled", DEFAULT_BACKUP_DIFF_ENABLED)?
+        .set_default(
+            "backups.diff.max_input_size_bytes",
+            DEFAULT_BACKUP_DIFF_MAX_INPUT_SIZE_BYTES,
+        )?
+        .set_default(
+            "backups.diff.generation_timeout_ms",
+            DEFAULT_BACKUP_DIFF_GENERATION_TIMEOUT_MS,
+        )?
+        // Keep the production binary independent from its current working
+        // directory. The committed, non-secret defaults are compiled into
+        // the executable; deployment files only override them.
+        .add_source(File::from_str(EMBEDDED_DEFAULT_CONFIG, FileFormat::Toml)))
+}
+
+fn deserialize_and_validate(
+    builder: ConfigBuilder<DefaultState>,
+) -> Result<AppConfig, ConfigError> {
+    let config = builder.build()?.try_deserialize::<AppConfig>()?;
+    config.validate()?;
+    log_loaded_configuration(&config);
+    Ok(config)
+}
+
+impl AppConfig {
     fn validate(&self) -> Result<(), ConfigError> {
         require_nonempty("jwt.secret", self.jwt.secret.expose_secret())?;
         require_nonempty("jwt.issuer", &self.jwt.issuer)?;
@@ -1545,7 +1598,11 @@ mod tests {
         config.validate().unwrap();
         assert_eq!(config.game_server.instances.len(), 2);
         assert_eq!(config.game_server.instances[1].id, "dev-dm");
-        assert!(config.game_server.instances[1].systemd_observation);
+        assert_eq!(
+            config.game_server.instances[1].management,
+            Some(crate::shared::config::model::InstanceManagementConfig::Systemd)
+        );
+        assert_eq!(config.game_server.instances[1].systemd_observation, None);
         assert_eq!(
             config.backups.storage.directory,
             std::path::PathBuf::from("/var/lib/lara/backups")

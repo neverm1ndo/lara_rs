@@ -95,7 +95,10 @@ pub struct ServerInstanceConfig {
     pub environment: InstanceEnvironmentConfig,
     #[serde(default)]
     pub sort_order: u32,
-    pub systemd_unit: String,
+    #[serde(default)]
+    pub management: Option<InstanceManagementConfig>,
+    #[serde(default)]
+    pub systemd_unit: Option<String>,
     #[serde(default)]
     pub storage_root: Option<PathBuf>,
     #[serde(default)]
@@ -104,9 +107,10 @@ pub struct ServerInstanceConfig {
     pub readiness: Option<InstanceReadinessConfig>,
     #[serde(default = "default_incident_tracking")]
     pub incident_tracking: bool,
-    /// Enables the Release A read-only systemd observer for this instance.
+    /// Deprecated Release A compatibility flag. New configurations use
+    /// `management = "external" | "systemd"`.
     #[serde(default)]
-    pub systemd_observation: bool,
+    pub systemd_observation: Option<bool>,
 }
 
 const fn default_incident_tracking() -> bool {
@@ -118,6 +122,13 @@ const fn default_incident_tracking() -> bool {
 pub enum InstanceKindConfig {
     Primary,
     Auxiliary,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum InstanceManagementConfig {
+    External,
+    Systemd,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]

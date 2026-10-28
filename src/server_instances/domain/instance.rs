@@ -52,6 +52,45 @@ pub enum InstanceEnvironment {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstanceManagement {
+    External,
+    Systemd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstanceClassification {
+    kind: InstanceKind,
+    environment: InstanceEnvironment,
+    management: InstanceManagement,
+}
+
+impl InstanceClassification {
+    pub const fn new(
+        kind: InstanceKind,
+        environment: InstanceEnvironment,
+        management: InstanceManagement,
+    ) -> Self {
+        Self {
+            kind,
+            environment,
+            management,
+        }
+    }
+
+    pub const fn kind(self) -> InstanceKind {
+        self.kind
+    }
+
+    pub const fn environment(self) -> InstanceEnvironment {
+        self.environment
+    }
+
+    pub const fn management(self) -> InstanceManagement {
+        self.management
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InstanceReadiness {
     Process,
     Uds,
@@ -84,8 +123,7 @@ impl InstanceObservability {
 pub struct ServerInstance {
     id: ServerInstanceId,
     display_name: String,
-    kind: InstanceKind,
-    environment: InstanceEnvironment,
+    classification: InstanceClassification,
     sort_order: u32,
     capabilities: InstanceCapabilities,
     observability: InstanceObservability,
@@ -95,8 +133,7 @@ impl ServerInstance {
     pub fn new(
         id: ServerInstanceId,
         display_name: impl Into<String>,
-        kind: InstanceKind,
-        environment: InstanceEnvironment,
+        classification: InstanceClassification,
         sort_order: u32,
         capabilities: InstanceCapabilities,
         observability: InstanceObservability,
@@ -109,7 +146,12 @@ impl ServerInstance {
         if !capabilities.contains(InstanceCapability::Lifecycle) {
             return Err(InvalidServerInstance::MissingLifecycle);
         }
-        match kind {
+        if classification.kind() == InstanceKind::Primary
+            && classification.management() == InstanceManagement::Systemd
+        {
+            return Err(InvalidServerInstance::PrimarySystemdManagementNotSupported);
+        }
+        match classification.kind() {
             InstanceKind::Primary => {
                 let required = InstanceCapabilities::primary();
                 if required
@@ -132,8 +174,7 @@ impl ServerInstance {
         Ok(Self {
             id,
             display_name: trimmed.to_owned(),
-            kind,
-            environment,
+            classification,
             sort_order,
             capabilities,
             observability,
@@ -149,11 +190,15 @@ impl ServerInstance {
     }
 
     pub const fn kind(&self) -> InstanceKind {
-        self.kind
+        self.classification.kind()
     }
 
     pub const fn environment(&self) -> InstanceEnvironment {
-        self.environment
+        self.classification.environment()
+    }
+
+    pub const fn management(&self) -> InstanceManagement {
+        self.classification.management()
     }
 
     pub const fn sort_order(&self) -> u32 {
@@ -179,6 +224,8 @@ pub enum InvalidServerInstance {
     MissingLifecycle,
     #[error("the primary server instance requires every supported capability")]
     IncompletePrimaryCapabilities,
+    #[error("Release B does not permit systemd management of the primary server instance")]
+    PrimarySystemdManagementNotSupported,
     #[error("auxiliary server instances cannot enable backups")]
     AuxiliaryBackups,
     #[error("auxiliary server instances cannot enable maps")]
@@ -193,8 +240,11 @@ mod tests {
         ServerInstance::new(
             ServerInstanceId::new("dev-dm").unwrap(),
             "Developer DM",
-            InstanceKind::Auxiliary,
-            InstanceEnvironment::Development,
+            InstanceClassification::new(
+                InstanceKind::Auxiliary,
+                InstanceEnvironment::Development,
+                InstanceManagement::Systemd,
+            ),
             20,
             InstanceCapabilities::new(capabilities),
             InstanceObservability::new(InstanceReadiness::Process, true),
@@ -240,8 +290,11 @@ mod tests {
             let result = ServerInstance::new(
                 ServerInstanceId::new("dev-dm").unwrap(),
                 "Developer DM",
-                InstanceKind::Auxiliary,
-                InstanceEnvironment::Development,
+                InstanceClassification::new(
+                    InstanceKind::Auxiliary,
+                    InstanceEnvironment::Development,
+                    InstanceManagement::Systemd,
+                ),
                 20,
                 InstanceCapabilities::new([InstanceCapability::Lifecycle, forbidden]),
                 InstanceObservability::new(InstanceReadiness::Process, true),
@@ -255,8 +308,11 @@ mod tests {
         let result = ServerInstance::new(
             ServerInstanceId::new("main").unwrap(),
             "Main",
-            InstanceKind::Primary,
-            InstanceEnvironment::Production,
+            InstanceClassification::new(
+                InstanceKind::Primary,
+                InstanceEnvironment::Production,
+                InstanceManagement::External,
+            ),
             10,
             InstanceCapabilities::new([InstanceCapability::Lifecycle]),
             InstanceObservability::new(InstanceReadiness::Uds, true),
@@ -265,6 +321,27 @@ mod tests {
         assert_eq!(
             result,
             Err(InvalidServerInstance::IncompletePrimaryCapabilities)
+        );
+    }
+
+    #[test]
+    fn release_b_keeps_primary_external() {
+        let result = ServerInstance::new(
+            ServerInstanceId::new("main").unwrap(),
+            "Main",
+            InstanceClassification::new(
+                InstanceKind::Primary,
+                InstanceEnvironment::Production,
+                InstanceManagement::Systemd,
+            ),
+            10,
+            InstanceCapabilities::primary(),
+            InstanceObservability::new(InstanceReadiness::Uds, true),
+        );
+
+        assert_eq!(
+            result,
+            Err(InvalidServerInstance::PrimarySystemdManagementNotSupported)
         );
     }
 }
