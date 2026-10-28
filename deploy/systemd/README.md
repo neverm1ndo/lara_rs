@@ -145,8 +145,48 @@ port, рабочий каталог и cgroup выбранного unit.
 
 ## Регистрация в Lara
 
-Production overlay должен содержать как primary, так и auxiliary: массив
-`game_server.instances` заменяется целиком.
+Реестр теперь безопасно редактируется тем же бинарником. Первый `instance add`
+автоматически материализует external primary из действующей конфигурации,
+сохраняет остальные TOML-комментарии и добавляет только auxiliary:
+
+```sh
+sudo lara instance add dev-dm \
+  --display-name "Developer DM" \
+  --environment development \
+  --storage-root /home/svr_dm \
+  --capability overview \
+  --capability lifecycle \
+  --capability configuration \
+  --capability incidents \
+  --sort-order 20 \
+  --dry-run
+
+# Повторить без --dry-run после проверки плана.
+sudo lara instance add dev-dm \
+  --display-name "Developer DM" \
+  --environment development \
+  --storage-root /home/svr_dm \
+  --capability overview \
+  --capability lifecycle \
+  --capability configuration \
+  --capability incidents \
+  --sort-order 20
+
+sudo lara instance list
+```
+
+`instance edit` заменяет только явно переданные поля. Если указан хотя бы один
+`--capability`, переданный набор заменяет прежний целиком. `instance remove`
+требует `--yes`; он удаляет только регистрацию и никогда не удаляет storage
+root, его содержимое, drop-in или запущенный процесс. Каждая запись overlay
+проверяется полным startup-валидатором, выполняется под file lock, создаёт
+timestamped backup и устанавливается atomic rename.
+
+До реализации `instance render-systemd` эти команды не создают systemd drop-in
+и не вызывают `daemon-reload`, `enable`, `start` или `stop`.
+
+Эквивалентная ручная форма production overlay содержит как primary, так и
+auxiliary: массив `game_server.instances` заменяется целиком.
 
 ```toml
 [game_server]

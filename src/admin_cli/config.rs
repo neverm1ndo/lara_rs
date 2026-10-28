@@ -137,7 +137,11 @@ fn paths(args: ConfigPathsArgs) -> Result<(), ConfigCliError> {
     print_result(args.output, &layout, human)
 }
 
-fn atomic_write(path: &Path, contents: &[u8], _owner_source: &Path) -> Result<(), ConfigCliError> {
+pub(super) fn atomic_write(
+    path: &Path,
+    contents: &[u8],
+    _owner_source: &Path,
+) -> Result<(), ConfigCliError> {
     let file_name = path
         .file_name()
         .and_then(|name| name.to_str())
@@ -183,7 +187,7 @@ fn atomic_write(path: &Path, contents: &[u8], _owner_source: &Path) -> Result<()
     Ok(())
 }
 
-fn sync_directory(_path: &Path) -> Result<(), ConfigCliError> {
+pub(super) fn sync_directory(_path: &Path) -> Result<(), ConfigCliError> {
     #[cfg(unix)]
     File::open(_path)
         .and_then(|directory| directory.sync_all())
@@ -191,13 +195,13 @@ fn sync_directory(_path: &Path) -> Result<(), ConfigCliError> {
     Ok(())
 }
 
-fn backup_path(path: &Path) -> PathBuf {
+pub(super) fn backup_path(path: &Path) -> PathBuf {
     let suffix = Utc::now().format("%Y%m%dT%H%M%S%.6fZ");
     let name = path.file_name().unwrap_or_default().to_string_lossy();
     path.with_file_name(format!("{name}.bak-{suffix}"))
 }
 
-fn print_result(
+pub(super) fn print_result(
     output: OutputFormat,
     value: &impl Serialize,
     human: String,
@@ -223,7 +227,11 @@ fn human_init(result: &InitResult) -> String {
     )
 }
 
-fn io_error(action: &'static str, path: &Path, source: std::io::Error) -> ConfigCliError {
+pub(super) fn io_error(
+    action: &'static str,
+    path: &Path,
+    source: std::io::Error,
+) -> ConfigCliError {
     ConfigCliError::Io {
         action,
         path: path.to_path_buf(),

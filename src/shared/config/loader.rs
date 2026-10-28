@@ -81,9 +81,35 @@ impl AppConfig {
         overlay: &Path,
         environment: impl IntoIterator<Item = (String, String)>,
     ) -> Result<Self, ConfigError> {
+        Self::load_explicit_source(
+            File::from(overlay).required(true),
+            environment.into_iter().collect(),
+        )
+    }
+
+    /// Validates an in-memory TOML overlay using the exact same defaults and
+    /// environment projection as daemon startup. Administrative mutations use
+    /// this before atomically replacing the host file.
+    pub fn load_explicit_toml(
+        overlay: &str,
+        environment: impl IntoIterator<Item = (String, String)>,
+    ) -> Result<Self, ConfigError> {
+        Self::load_explicit_source(
+            File::from_str(overlay, FileFormat::Toml),
+            environment.into_iter().collect(),
+        )
+    }
+
+    fn load_explicit_source<T>(
+        overlay: T,
+        environment: Map<String, String>,
+    ) -> Result<Self, ConfigError>
+    where
+        T: ::config::Source + Send + Sync + 'static,
+    {
         let mut builder = base_builder()?
-            .add_source(File::from(overlay).required(true))
-            .add_source(lara_environment(Some(environment.into_iter().collect())));
+            .add_source(overlay)
+            .add_source(lara_environment(Some(environment)));
         builder = apply_legacy_environment(builder)?;
         builder = builder.add_source(lara_environment(None));
         deserialize_and_validate(builder)

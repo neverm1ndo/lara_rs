@@ -161,6 +161,14 @@ capabilities, затем:
 7. выполняет `daemon-reload` после успешной записи;
 8. сообщает необходимые изменения ACL отдельным планом.
 
+Реализация разделена на безопасные этапы. Реализованные `instance
+list/add/edit/remove` отвечают только за реестр в production overlay: они
+сохраняют TOML-комментарии, материализуют legacy primary при первом добавлении,
+повторно используют полный startup-валидатор и не касаются storage root.
+Генерация drop-in, проверка executable/Unix user и `daemon-reload` относятся к
+следующей команде `instance render-systemd`; до неё registry CLI не выдаёт себя
+за завершённый systemd deployment.
+
 CLI использует file lock, временный файл, `fsync` и atomic rename. Перед
 изменением существующего файла создаётся резервная копия. Удаление регистрации
 или drop-in никогда не удаляет storage root и файлы игрового сервера.

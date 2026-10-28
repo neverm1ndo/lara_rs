@@ -26,6 +26,128 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Inspect and safely edit the configured game-server registry.
+    Instance {
+        #[command(subcommand)]
+        command: InstanceCommand,
+    },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum InstanceCommand {
+    /// List the effective registry after applying daemon validation rules.
+    List(InstanceListArgs),
+    /// Register a systemd-managed auxiliary instance.
+    Add(InstanceAddArgs),
+    /// Edit mutable metadata of an auxiliary instance.
+    Edit(InstanceEditArgs),
+    /// Remove an auxiliary registration without deleting server files.
+    Remove(InstanceRemoveArgs),
+}
+
+#[derive(Debug, Args, Clone, PartialEq, Eq)]
+pub struct InstanceConfigArgs {
+    /// Explicit production TOML overlay to read or update.
+    #[arg(long, default_value = "/etc/lara/production.toml")]
+    pub overlay_file: PathBuf,
+    /// Environment file used for the same validation as daemon startup.
+    #[arg(long, default_value = "/etc/lara/lara.env")]
+    pub environment_file: PathBuf,
+    /// Output format for automation or human operators.
+    #[arg(long, value_enum, default_value_t)]
+    pub output: OutputFormat,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct InstanceListArgs {
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct InstanceAddArgs {
+    /// Stable lowercase instance identifier used by APIs and systemd.
+    pub id: String,
+    /// Human-readable name shown in the control panel.
+    #[arg(long)]
+    pub display_name: String,
+    /// Runtime environment classification.
+    #[arg(long, value_enum, default_value_t)]
+    pub environment: InstanceEnvironmentArg,
+    /// Isolated root containing only this game server's resources.
+    #[arg(long)]
+    pub storage_root: PathBuf,
+    /// Enabled panel capabilities. May be repeated.
+    #[arg(long = "capability", value_enum, default_values_t = [
+        InstanceCapabilityArg::Overview,
+        InstanceCapabilityArg::Lifecycle,
+        InstanceCapabilityArg::Incidents,
+    ])]
+    pub capabilities: Vec<InstanceCapabilityArg>,
+    /// Stable navigation order in the client manifest.
+    #[arg(long, default_value_t = 100)]
+    pub sort_order: u32,
+    /// Override the default `lara-game@<id>.service` unit name.
+    #[arg(long)]
+    pub systemd_unit: Option<String>,
+    /// Show the validated mutation without changing the overlay.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct InstanceEditArgs {
+    /// Stable identifier of an existing auxiliary instance.
+    pub id: String,
+    #[arg(long)]
+    pub display_name: Option<String>,
+    #[arg(long, value_enum)]
+    pub environment: Option<InstanceEnvironmentArg>,
+    #[arg(long)]
+    pub storage_root: Option<PathBuf>,
+    /// Replace the complete capability set. May be repeated.
+    #[arg(long = "capability", value_enum)]
+    pub capabilities: Vec<InstanceCapabilityArg>,
+    #[arg(long)]
+    pub sort_order: Option<u32>,
+    #[arg(long)]
+    pub systemd_unit: Option<String>,
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct InstanceRemoveArgs {
+    /// Stable identifier of an existing auxiliary instance.
+    pub id: String,
+    /// Confirm removal of the registry entry. Server files remain untouched.
+    #[arg(long)]
+    pub yes: bool,
+    /// Show the validated mutation without changing the overlay.
+    #[arg(long)]
+    pub dry_run: bool,
+    #[command(flatten)]
+    pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Clone, Copy, Default, ValueEnum, PartialEq, Eq)]
+pub enum InstanceEnvironmentArg {
+    Production,
+    Development,
+    #[default]
+    Testing,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum InstanceCapabilityArg {
+    Overview,
+    Lifecycle,
+    Configuration,
+    Incidents,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -147,7 +269,44 @@ mod tests {
                 .get_subcommands()
                 .map(clap::Command::get_name)
                 .collect::<Vec<_>>(),
-            ["serve", "config"]
+            ["serve", "config", "instance"]
         );
+    }
+
+    #[test]
+    fn parses_instance_add_with_optional_configuration_capability() {
+        let cli = Cli::try_parse_from([
+            "lara",
+            "instance",
+            "add",
+            "test",
+            "--display-name",
+            "Test server",
+            "--storage-root",
+            "/home/svr_test",
+            "--capability",
+            "lifecycle",
+            "--capability",
+            "configuration",
+            "--dry-run",
+        ])
+        .unwrap();
+
+        let Command::Instance {
+            command: InstanceCommand::Add(args),
+        } = cli.command
+        else {
+            panic!("expected instance add command")
+        };
+        assert_eq!(args.id, "test");
+        assert_eq!(args.storage_root, PathBuf::from("/home/svr_test"));
+        assert_eq!(
+            args.capabilities,
+            [
+                InstanceCapabilityArg::Lifecycle,
+                InstanceCapabilityArg::Configuration
+            ]
+        );
+        assert!(args.dry_run);
     }
 }
