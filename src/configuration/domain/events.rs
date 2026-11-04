@@ -88,11 +88,35 @@ impl ConfigurationFileChanged {
         storage_event: &FileChanged,
         access: &ConfigurationAccess,
     ) -> Result<Self, InvalidConfigurationDomainEvent> {
+        Self::from_storage_paths(storage_event, access, true)
+    }
+
+    /// Converts an event produced by a coordinator rooted at the complete
+    /// game-server storage. Paths are already global and must not be prefixed
+    /// with a configurator capability a second time.
+    pub fn from_server_storage(
+        storage_event: &FileChanged,
+        access: &ConfigurationAccess,
+    ) -> Result<Self, InvalidConfigurationDomainEvent> {
+        Self::from_storage_paths(storage_event, access, false)
+    }
+
+    fn from_storage_paths(
+        storage_event: &FileChanged,
+        access: &ConfigurationAccess,
+        paths_are_scoped: bool,
+    ) -> Result<Self, InvalidConfigurationDomainEvent> {
         if storage_event.namespace().as_str() != CONFIGURATION_STORAGE_NAMESPACE {
             return Err(InvalidConfigurationDomainEvent::UnexpectedNamespace);
         }
 
-        let server_path = |path: &RelativeStoragePath| access.server_path(path);
+        let server_path = |path: &RelativeStoragePath| {
+            if paths_are_scoped {
+                access.server_path(path)
+            } else {
+                path.clone()
+            }
+        };
         let change = match storage_event.kind() {
             FileMutationKind::Create => {
                 let path = valid_create(storage_event)?;
@@ -404,6 +428,31 @@ mod tests {
             }
         );
         assert_eq!(event.access_level(), ConfigurationAccessLevel::Configurator);
+    }
+
+    #[test]
+    fn preserves_paths_already_rooted_at_the_complete_server_storage() {
+        let storage = storage_event(
+            "configuration",
+            FileMutationKind::Delete,
+            Some(path("scriptfiles/config/private/server.cfg")),
+            None,
+            Some(revision(1_700_000_000)),
+            None,
+        );
+
+        let event = ConfigurationFileChanged::from_server_storage(
+            &storage,
+            &access(UserRole::Configurator),
+        )
+        .unwrap();
+
+        assert_eq!(
+            event.change(),
+            &ConfigurationFileChange::Deleted {
+                path: path("scriptfiles/config/private/server.cfg")
+            }
+        );
     }
 
     #[test]

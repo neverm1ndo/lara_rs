@@ -1,6 +1,7 @@
 use std::{error::Error, sync::Arc, time::Duration};
 
 use axum::Router;
+use encoding_rs::Encoding;
 use mongodb::Client;
 use sea_orm::Database;
 use tokio::sync::watch;
@@ -56,6 +57,11 @@ use crate::{
             snapshot_store::LocalBackupSnapshotStore,
         },
     },
+    configuration::{
+        self,
+        domain::{BinaryExtension, ConfigurationFilePolicy},
+        infrastructure::file_service::LocalConfigurationFileService,
+    },
     maps::{
         self,
         domain::{MAPS_STORAGE_NAMESPACE, MapFilePolicy},
@@ -90,7 +96,7 @@ use crate::{
             content::FileContentClassifier,
             local::{FileStorageLimits, LocalFileStorage},
             mutation::StorageNamespace,
-            path::RelativeStoragePath,
+            path::{RelativeStoragePath, StorageFileName},
             upload::MultipartUploadLimits,
         },
     },
@@ -200,6 +206,39 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let game_server_storage =
         LocalFileStorage::open(&config.game_server.storage.root, storage_limits).await?;
     let maps_storage = game_server_storage.scoped(&maps_directory).await?;
+    let configuration_encoding = Encoding::for_label(
+        config.configuration.files.fallback_encoding.as_bytes(),
+    )
+    .ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "configuration.files.fallback_encoding is not a recognized WHATWG label",
+        )
+    })?;
+    let configuration_policy = ConfigurationFilePolicy::new(
+        config
+            .configuration
+            .files
+            .binary_extensions
+            .iter()
+            .cloned()
+            .map(BinaryExtension::new)
+            .collect::<Result<Vec<_>, _>>()?,
+        config
+            .configuration
+            .files
+            .binary_file_names
+            .iter()
+            .map(StorageFileName::new)
+            .collect::<Result<Vec<_>, _>>()?,
+        config
+            .configuration
+            .files
+            .ignored_paths
+            .iter()
+            .map(|path| RelativeStoragePath::try_from(path.as_path()))
+            .collect::<Result<Vec<_>, _>>()?,
+    )?;
 
     let mysql = Database::connect(config.mysql.url.expose_secret()).await?;
     let mongo = Client::with_uri_str(config.mongodb.uri.expose_secret()).await?;
@@ -315,15 +354,26 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
             config.backups.storage.compression_threshold_bytes,
         )?,
     ));
+    let configuration_file_service = LocalConfigurationFileService::new(
+        game_server_storage.clone(),
+        configuration_policy.clone(),
+        backup_provider.clone(),
+        configuration_encoding.name().to_ascii_lowercase(),
+    );
     let maps_file_service =
         LocalMapsFileService::with_required_backups(maps_storage.clone(), backup_provider);
 
     let maps_namespace = StorageNamespace::new(MAPS_STORAGE_NAMESPACE)?;
-    let restore_target = Arc::new(CapabilityBackupRestoreTarget::new().register(
-        maps_namespace,
-        maps_storage,
-        |path| MapFilePolicy.recognizes(path),
-    ));
+    let configuration_namespace = StorageNamespace::new("configuration")?;
+    let restore_target = Arc::new(
+        CapabilityBackupRestoreTarget::new()
+            .register(maps_namespace, maps_storage, |path| {
+                MapFilePolicy.recognizes(path)
+            })
+            .register(configuration_namespace, game_server_storage, move |path| {
+                !configuration_policy.is_ignored(path)
+            }),
+    );
     let backup_lifecycle_service = Arc::new(BackupLifecycleService::new(
         backup_repository.clone(),
         snapshot_store.clone(),
@@ -425,6 +475,9 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         runtime_state_reader,
         lifecycle_operation_service,
         configurator_directory,
+        configuration_file_service,
+        configuration_encoding,
+        storage_limits.max_stream_size_bytes,
         maps_file_service,
         maps_upload_limits,
         backup_lifecycle_service,
@@ -435,6 +488,10 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let (router, openapi) = OpenApiRouter::<AppState>::with_openapi(openapi)
         .merge(server_instances::presentation::router::<AppState>())
         .nest("/auth", auth::presentation::mfa_router::<AppState>())
+        .nest(
+            "/configuration",
+            configuration::presentation::router::<AppState>(),
+        )
         .nest("/maps", maps::presentation::router::<AppState>())
         .nest("/backups", backups::presentation::router::<AppState>())
         .nest("/user", user::presentation::router::<AppState>())
@@ -454,6 +511,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
 
 fn base_openapi_document() -> utoipa::openapi::OpenApi {
     auth::presentation::openapi_document()
+        .merge_from(configuration::presentation::openapi_document())
         .merge_from(maps::presentation::openapi_document())
         .merge_from(backups::presentation::openapi_document())
         .merge_from(server_instances::presentation::openapi_document())
@@ -483,6 +541,12 @@ mod tests {
         },
         backups::{
             application::lifecycle::BackupLifecycleService, presentation::state::BackupsState,
+        },
+        configuration::{
+            application::file_service::ConfigurationFileService,
+            presentation::{
+                authorization::ConfigurationAuthorizationState, state::ConfigurationState,
+            },
         },
         maps::{application::file_service::MapsFileService, presentation::state::MapsState},
         server_instances::{
@@ -525,6 +589,26 @@ mod tests {
         }
     }
 
+    impl ConfigurationAuthorizationState for DocumentationState {
+        fn configurator_directory(&self) -> &RelativeStoragePath {
+            panic!("documentation generation does not resolve configuration")
+        }
+    }
+
+    impl ConfigurationState for DocumentationState {
+        fn configuration_file_service(&self) -> Arc<dyn ConfigurationFileService> {
+            panic!("documentation generation does not resolve application services")
+        }
+
+        fn configuration_file_encoding(&self) -> &'static Encoding {
+            encoding_rs::WINDOWS_1251
+        }
+
+        fn configuration_file_upload_limit_bytes(&self) -> u64 {
+            10 * 1024 * 1024
+        }
+    }
+
     impl BackupsState for DocumentationState {
         fn backup_lifecycle_service(&self) -> Arc<BackupLifecycleService> {
             panic!("documentation generation does not resolve application services")
@@ -556,6 +640,7 @@ mod tests {
         let document = OpenApiRouter::<DocumentationState>::with_openapi(base_openapi_document())
             .merge(crate::server_instances::presentation::router())
             .nest("/auth", auth::presentation::mfa_router())
+            .nest("/configuration", configuration::presentation::router())
             .nest("/maps", maps::presentation::router())
             .nest("/backups", backups::presentation::router())
             .nest("/user", user::presentation::router())
@@ -569,6 +654,8 @@ mod tests {
         assert!(specification["paths"]["/auth/mfa"]["get"].is_object());
         assert!(specification["paths"]["/auth/mfa/totp"]["delete"].is_object());
         assert!(specification["paths"]["/maps/tree"]["get"].is_object());
+        assert!(specification["paths"]["/configuration/tree"]["get"].is_object());
+        assert!(specification["paths"]["/configuration/files"]["post"].is_object());
         assert!(specification["paths"]["/maps/files"]["post"].is_object());
         assert!(specification["paths"]["/backups/list"]["get"].is_object());
         assert!(specification["paths"]["/backups/backup/{backup_id}"]["get"].is_object());

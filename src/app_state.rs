@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use encoding_rs::Encoding;
+
 use crate::auth::{
     application::{
         authenticate_jwt::AuthenticateBearerToken,
@@ -9,7 +11,10 @@ use crate::auth::{
 };
 use crate::{
     backups::{application::lifecycle::BackupLifecycleService, presentation::state::BackupsState},
-    configuration::presentation::authorization::ConfigurationAuthorizationState,
+    configuration::{
+        application::file_service::ConfigurationFileService,
+        presentation::{authorization::ConfigurationAuthorizationState, state::ConfigurationState},
+    },
     maps::{application::file_service::MapsFileService, presentation::state::MapsState},
     server_instances::application::{
         lifecycle_service::LifecycleOperationService, registry::InstanceRegistry,
@@ -30,6 +35,9 @@ pub struct AppState {
     runtime_state_reader: Arc<dyn RuntimeStateReader>,
     lifecycle_operation_service: Arc<LifecycleOperationService>,
     configurator_directory: RelativeStoragePath,
+    configuration_file_service: Arc<dyn ConfigurationFileService>,
+    configuration_file_encoding: &'static Encoding,
+    configuration_file_upload_limit_bytes: u64,
     maps_file_service: Arc<dyn MapsFileService>,
     maps_upload_limits: MultipartUploadLimits,
     backup_lifecycle_service: Arc<BackupLifecycleService>,
@@ -46,6 +54,9 @@ impl AppState {
         runtime_state_reader: Arc<dyn RuntimeStateReader>,
         lifecycle_operation_service: Arc<LifecycleOperationService>,
         configurator_directory: RelativeStoragePath,
+        configuration_file_service: impl ConfigurationFileService + 'static,
+        configuration_file_encoding: &'static Encoding,
+        configuration_file_upload_limit_bytes: u64,
         maps_file_service: impl MapsFileService + 'static,
         maps_upload_limits: MultipartUploadLimits,
         backup_lifecycle_service: Arc<BackupLifecycleService>,
@@ -59,6 +70,9 @@ impl AppState {
             runtime_state_reader,
             lifecycle_operation_service,
             configurator_directory,
+            configuration_file_service: Arc::new(configuration_file_service),
+            configuration_file_encoding,
+            configuration_file_upload_limit_bytes,
             maps_file_service: Arc::new(maps_file_service),
             maps_upload_limits,
             backup_lifecycle_service,
@@ -111,6 +125,20 @@ impl JwtExtractorState for AppState {
 impl ConfigurationAuthorizationState for AppState {
     fn configurator_directory(&self) -> &RelativeStoragePath {
         &self.configurator_directory
+    }
+}
+
+impl ConfigurationState for AppState {
+    fn configuration_file_service(&self) -> Arc<dyn ConfigurationFileService> {
+        Arc::clone(&self.configuration_file_service)
+    }
+
+    fn configuration_file_encoding(&self) -> &'static Encoding {
+        self.configuration_file_encoding
+    }
+
+    fn configuration_file_upload_limit_bytes(&self) -> u64 {
+        self.configuration_file_upload_limit_bytes
     }
 }
 
