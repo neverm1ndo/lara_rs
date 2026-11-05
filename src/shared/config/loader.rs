@@ -366,10 +366,14 @@ impl AppConfig {
             self.maps.upload.max_file_size_bytes,
             MAX_MAP_BATCH_SIZE_BYTES,
         )?;
-        validate_backup_directory(
-            &self.game_server.storage.root,
-            &self.backups.storage.directory,
-        )?;
+        let primary_storage_root = self
+            .game_server
+            .instances
+            .iter()
+            .find(|instance| instance.id == self.game_server.primary_instance)
+            .and_then(|instance| instance.storage_root.as_deref())
+            .unwrap_or(&self.game_server.storage.root);
+        validate_backup_directory(primary_storage_root, &self.backups.storage.directory)?;
         validate_backup_compression(
             self.backups.storage.compression,
             self.backups.storage.compression_level,
@@ -1056,6 +1060,23 @@ mod tests {
         );
         config.game_server.instances.push(auxiliary);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn backup_directory_checks_effective_primary_storage_root() {
+        let mut config = valid_config();
+        let mut primary = auxiliary_with_configuration();
+        primary.id = "main".into();
+        primary.kind = InstanceKindConfig::Primary;
+        primary.capabilities.push(InstanceCapabilityConfig::Maps);
+        primary.capabilities.push(InstanceCapabilityConfig::Backups);
+        primary.storage_root = Some("D:/different-primary".into());
+        config.game_server.instances = vec![primary];
+        config.backups.storage.directory = "D:/different-primary/backups".into();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::BackupDirectoryInsideGameServerRoot)
+        ));
     }
 
     #[test]

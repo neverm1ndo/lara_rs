@@ -58,9 +58,14 @@ use crate::{
         },
     },
     configuration::{
-        application::target::ConfigurationTargetResolver,
+        application::{
+            instance_text::InstanceConfigurationTextService, target::ConfigurationTargetResolver,
+        },
         domain::{BinaryExtension, ConfigurationFilePolicy},
-        infrastructure::file_service::LocalConfigurationFileService,
+        infrastructure::{
+            file_service::LocalConfigurationFileService,
+            instance_text::LocalInstanceConfigurationTextService,
+        },
     },
     configuration_targets::ConfigurationTargetCatalog,
     maps::{
@@ -158,6 +163,7 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
 struct BuiltApplication {
     router: Router,
     _configuration_target_resolver: Arc<dyn ConfigurationTargetResolver>,
+    _instance_text_service: Arc<dyn InstanceConfigurationTextService>,
     maintenance_worker: BackupMaintenanceWorker,
     systemd_observer: Option<SystemdObserverWorker>,
     lifecycle_reconciliation: Option<LifecycleReconciliationWorker>,
@@ -194,6 +200,17 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     );
     let configuration_target_resolver: Arc<dyn ConfigurationTargetResolver> =
         Arc::new(ConfigurationTargetCatalog::open(&config, instance_registry.clone()).await?);
+    let primary_configuration = match config
+        .game_server
+        .instances
+        .iter()
+        .find(|entry| entry.id == config.game_server.primary_instance)
+    {
+        Some(entry) => config
+            .effective_configuration_policy(entry)?
+            .expect("validated primary has configuration capability"),
+        None => config.implicit_primary_configuration_policy()?,
+    };
     let configurator_directory =
         RelativeStoragePath::try_from(config.configuration.files.configurator_directory.as_path())?;
     let maps_directory = RelativeStoragePath::try_from(config.maps.files.directory.as_path())?;
@@ -207,11 +224,15 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         config.maps.upload.max_file_size_bytes,
         config.maps.upload.max_total_size_bytes,
     )?;
-    let game_server_storage =
-        LocalFileStorage::open(&config.game_server.storage.root, storage_limits).await?;
+    let primary_id = instance_registry.primary().id().clone();
+    let primary_storage_root = instance_registry
+        .configured(&primary_id)
+        .expect("validated registry always contains its primary")
+        .storage_root();
+    let game_server_storage = LocalFileStorage::open(primary_storage_root, storage_limits).await?;
     let maps_storage = game_server_storage.scoped(&maps_directory).await?;
     let configuration_encoding = Encoding::for_label(
-        config.configuration.files.fallback_encoding.as_bytes(),
+        primary_configuration.fallback_encoding.as_bytes(),
     )
     .ok_or_else(|| {
         std::io::Error::new(
@@ -220,24 +241,18 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         )
     })?;
     let configuration_policy = ConfigurationFilePolicy::new(
-        config
-            .configuration
-            .files
+        primary_configuration
             .binary_extensions
             .iter()
             .cloned()
             .map(BinaryExtension::new)
             .collect::<Result<Vec<_>, _>>()?,
-        config
-            .configuration
-            .files
+        primary_configuration
             .binary_file_names
             .iter()
             .map(StorageFileName::new)
             .collect::<Result<Vec<_>, _>>()?,
-        config
-            .configuration
-            .files
+        primary_configuration
             .ignored_paths
             .iter()
             .map(|path| RelativeStoragePath::try_from(path.as_path()))
@@ -334,7 +349,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         config.backups.diff.enabled,
         config.backups.diff.max_input_size_bytes,
         Duration::from_millis(config.backups.diff.generation_timeout_ms),
-        &config.configuration.files.fallback_encoding,
+        &primary_configuration.fallback_encoding,
     )?);
     let clock = Arc::new(SystemBackupClock);
     let compression = match config.backups.storage.compression {
@@ -348,8 +363,8 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         clock.clone(),
         Arc::new(UuidBackupIdGenerator),
         FileContentClassifier::new(
-            config.configuration.files.binary_extensions.clone(),
-            config.configuration.files.binary_file_names.clone(),
+            primary_configuration.binary_extensions.clone(),
+            primary_configuration.binary_file_names.clone(),
         )?,
         BackupPreparationPolicy::new(
             Duration::from_secs(config.backups.retention.lifetime_seconds),
@@ -358,6 +373,9 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
             config.backups.storage.compression_threshold_bytes,
         )?,
     ));
+    let instance_text_service: Arc<dyn InstanceConfigurationTextService> = Arc::new(
+        LocalInstanceConfigurationTextService::new(backup_provider.clone()),
+    );
     let configuration_file_service = LocalConfigurationFileService::new(
         game_server_storage.clone(),
         configuration_policy.clone(),
@@ -503,6 +521,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
             .merge(auth::presentation::openapi_router(openapi))
             .layer(socket_io_layer),
         _configuration_target_resolver: configuration_target_resolver,
+        _instance_text_service: instance_text_service,
         maintenance_worker,
         systemd_observer,
         lifecycle_reconciliation,

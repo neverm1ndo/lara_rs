@@ -7,12 +7,15 @@ use std::{
 };
 
 use chrono::{DateTime, Utc};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
-use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeekExt};
+use tokio::sync::{Mutex, MutexGuard};
+use uuid::Uuid;
 
 use super::{
     guard::{FileSnapshot, FileSnapshotSource, ReadFileSnapshotError, ReadFileSnapshotFuture},
-    mutation::FileRevision,
+    mutation::{ContentHashAlgorithm, FileContentHash, FileRevision},
     path::{RelativeStoragePath, StorageFileName},
 };
 
@@ -101,6 +104,7 @@ impl FileStorageLimits {
 pub struct LocalFileStorage {
     root: Arc<PathBuf>,
     limits: FileStorageLimits,
+    mutation_lock: Arc<Mutex<()>>,
 }
 
 impl LocalFileStorage {
@@ -122,6 +126,7 @@ impl LocalFileStorage {
         Ok(Self {
             root: Arc::new(canonical),
             limits,
+            mutation_lock: Arc::new(Mutex::new(())),
         })
     }
 
@@ -131,6 +136,10 @@ impl LocalFileStorage {
 
     pub(crate) fn canonical_root(&self) -> &Path {
         &self.root
+    }
+
+    pub(crate) async fn lock_mutations(&self) -> MutexGuard<'_, ()> {
+        self.mutation_lock.lock().await
     }
 
     pub async fn scoped(&self, scope: &RelativeStoragePath) -> Result<Self, LocalFileStorageError> {
@@ -160,6 +169,7 @@ impl LocalFileStorage {
         Ok(Self {
             root: Arc::new(canonical),
             limits: self.limits,
+            mutation_lock: Arc::clone(&self.mutation_lock),
         })
     }
 
@@ -182,7 +192,7 @@ impl LocalFileStorage {
         path: &RelativeStoragePath,
     ) -> Result<OpenedStorageFile, LocalFileStorageError> {
         let target = self.resolve_existing_file(path).await?;
-        let file = tokio::fs::File::open(target).await?;
+        let mut file = tokio::fs::File::open(target).await?;
         let metadata = file.metadata().await?;
         if !metadata.is_file() {
             return Err(LocalFileStorageError::NotFile);
@@ -194,7 +204,15 @@ impl LocalFileStorage {
         }
 
         let modified_at = metadata.modified()?.into();
-        let revision = FileRevision::from_metadata(metadata.len(), modified_at);
+        let (hash, observed_size) = hash_file(&mut file, self.limits.max_stream_size_bytes).await?;
+        if observed_size != metadata.len()
+            || file.metadata().await?.modified()? != metadata.modified()?
+        {
+            return Err(LocalFileStorageError::ChangedDuringRead);
+        }
+        let revision =
+            FileRevision::from_metadata(metadata.len(), modified_at).with_content_hash(hash);
+        file.seek(std::io::SeekFrom::Start(0)).await?;
         let content_length = metadata.len();
         Ok(OpenedStorageFile {
             reader: Box::pin(file.take(content_length)),
@@ -290,14 +308,24 @@ impl LocalFileStorage {
         })
     }
 
-    pub(super) async fn file_revision(
+    pub(crate) async fn file_revision(
         &self,
         path: &RelativeStoragePath,
     ) -> Result<FileRevision, LocalFileStorageError> {
         let target = self.resolve_existing_file(path).await?;
-        let metadata = tokio::fs::metadata(target).await?;
+        let mut file = tokio::fs::File::open(target).await?;
+        let metadata = file.metadata().await?;
         let modified_at = metadata.modified()?.into();
-        Ok(FileRevision::from_metadata(metadata.len(), modified_at))
+        if metadata.len() > self.limits.max_stream_size_bytes {
+            return Ok(FileRevision::from_metadata(metadata.len(), modified_at));
+        }
+        let (hash, observed_size) = hash_file(&mut file, self.limits.max_stream_size_bytes).await?;
+        if observed_size != metadata.len()
+            || file.metadata().await?.modified()? != metadata.modified()?
+        {
+            return Err(LocalFileStorageError::ChangedDuringRead);
+        }
+        Ok(FileRevision::from_metadata(metadata.len(), modified_at).with_content_hash(hash))
     }
 
     pub(super) async fn ensure_absent(
@@ -333,12 +361,52 @@ impl LocalFileStorage {
         content: &[u8],
     ) -> Result<(), LocalFileStorageError> {
         let target = self.resolve_existing_file(path).await?;
+        let original = tokio::fs::symlink_metadata(&target).await?;
+        if is_link_or_reparse_point(&original) {
+            return Err(LocalFileStorageError::LinkOrReparsePoint);
+        }
+        if !original.is_file() {
+            return Err(LocalFileStorageError::NotFile);
+        }
+        let parent = target.parent().expect("resolved file has a parent");
+        let temporary = parent.join(format!(".lara-replace-{}", Uuid::new_v4()));
         let mut options = tokio::fs::OpenOptions::new();
-        options.write(true).truncate(true);
-        let mut file = options.open(target).await?;
+        options.write(true).create_new(true);
+        let mut file = options.open(&temporary).await?;
+        let mut cleanup = TemporaryReplacement::new(temporary.clone());
         use tokio::io::AsyncWriteExt;
         file.write_all(content).await?;
-        file.flush().await?;
+        file.sync_all().await?;
+        tokio::fs::set_permissions(&temporary, original.permissions()).await?;
+        #[cfg(target_os = "linux")]
+        {
+            let source = std::fs::File::open(&target)?;
+            let source_metadata = source.metadata()?;
+            if source_metadata.len() != original.len()
+                || source_metadata.modified()? != original.modified()?
+                || !same_ownership(&source_metadata, &original)
+            {
+                return Err(LocalFileStorageError::ChangedDuringRead);
+            }
+            copy_posix_access_acl(&source, &file)?;
+        }
+        file.sync_all().await?;
+        let replacement = file.metadata().await?;
+        if !same_ownership(&original, &replacement) || !same_permissions(&original, &replacement) {
+            return Err(LocalFileStorageError::MetadataPreservationUnavailable);
+        }
+        drop(file);
+        let current = tokio::fs::symlink_metadata(&target).await?;
+        if is_link_or_reparse_point(&current)
+            || !current.is_file()
+            || current.len() != original.len()
+            || current.modified()? != original.modified()?
+            || !same_ownership(&current, &original)
+        {
+            return Err(LocalFileStorageError::ChangedDuringRead);
+        }
+        tokio::fs::rename(&temporary, &target).await?;
+        cleanup.disarm();
         Ok(())
     }
 
@@ -468,6 +536,133 @@ fn snapshot_read_error(error: LocalFileStorageError) -> ReadFileSnapshotError {
     }
 }
 
+async fn hash_file(
+    file: &mut tokio::fs::File,
+    maximum: u64,
+) -> Result<(FileContentHash, u64), LocalFileStorageError> {
+    let mut hasher = Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        size += read as u64;
+        if size > maximum {
+            return Err(LocalFileStorageError::ContentTooLarge { maximum });
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let hash = FileContentHash::new(
+        ContentHashAlgorithm::Sha256,
+        format!("{:x}", hasher.finalize()),
+    )
+    .expect("SHA-256 always has a 64-character hex digest");
+    Ok((hash, size))
+}
+
+struct TemporaryReplacement {
+    path: Option<PathBuf>,
+}
+
+impl TemporaryReplacement {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn disarm(&mut self) {
+        self.path = None;
+    }
+}
+
+impl Drop for TemporaryReplacement {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn same_ownership(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    left.uid() == right.uid() && left.gid() == right.gid()
+}
+
+#[cfg(unix)]
+fn same_permissions(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    left.permissions().mode() & 0o7777 == right.permissions().mode() & 0o7777
+}
+
+#[cfg(not(unix))]
+fn same_permissions(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+    true
+}
+
+#[cfg(target_os = "linux")]
+fn copy_posix_access_acl(source: &std::fs::File, destination: &tokio::fs::File) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+
+    let name = c"system.posix_acl_access";
+    // These calls operate on already opened descriptors, so the target path
+    // cannot be redirected by a symlink while the ACL is copied.
+    let size =
+        unsafe { libc::fgetxattr(source.as_raw_fd(), name.as_ptr(), std::ptr::null_mut(), 0) };
+    if size < 0 {
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::ENODATA) {
+            let removed = unsafe { libc::fremovexattr(destination.as_raw_fd(), name.as_ptr()) };
+            if removed < 0 {
+                let remove_error = io::Error::last_os_error();
+                if remove_error.raw_os_error() != Some(libc::ENODATA) {
+                    return Err(remove_error);
+                }
+            }
+            return Ok(());
+        }
+        if error.raw_os_error() == Some(libc::EOPNOTSUPP) {
+            return Ok(());
+        }
+        return Err(error);
+    }
+
+    let mut value = vec![0_u8; size as usize];
+    let read = unsafe {
+        libc::fgetxattr(
+            source.as_raw_fd(),
+            name.as_ptr(),
+            value.as_mut_ptr().cast(),
+            value.len(),
+        )
+    };
+    if read < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if read != size {
+        return Err(io::Error::other("file ACL changed during replacement"));
+    }
+    let written = unsafe {
+        libc::fsetxattr(
+            destination.as_raw_fd(),
+            name.as_ptr(),
+            value.as_ptr().cast(),
+            value.len(),
+            0,
+        )
+    };
+    if written < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn same_ownership(_left: &std::fs::Metadata, _right: &std::fs::Metadata) -> bool {
+    true
+}
+
 fn absolute_path(path: &Path) -> Result<PathBuf, io::Error> {
     if path.is_absolute() {
         Ok(path.to_owned())
@@ -511,6 +706,10 @@ pub enum LocalFileStorageError {
     TreeEntryLimitExceeded { maximum: usize },
     #[error("file exceeds the configured {maximum}-byte stream limit")]
     ContentTooLarge { maximum: u64 },
+    #[error("file changed while its content hash was being read")]
+    ChangedDuringRead,
+    #[error("atomic replacement cannot preserve the existing file owner, group or mode")]
+    MetadataPreservationUnavailable,
     #[error("file-storage root or scope must not be a symbolic link or reparse point")]
     LinkOrReparsePoint,
     #[error("file-storage scope resolves outside its capability root")]
@@ -549,6 +748,33 @@ mod tests {
 
     fn limits() -> FileStorageLimits {
         FileStorageLimits::new(32, 10_000, 10 * 1024 * 1024).unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn atomic_replacement_preserves_unix_owner_group_and_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let directory = TestDirectory::new();
+        let absolute = directory.0.join("server.cfg");
+        fs::write(&absolute, b"before").unwrap();
+        fs::set_permissions(&absolute, fs::Permissions::from_mode(0o640)).unwrap();
+        let before = fs::metadata(&absolute).unwrap();
+        let storage = LocalFileStorage::open(&directory.0, limits())
+            .await
+            .unwrap();
+
+        storage
+            .overwrite_file(&RelativeStoragePath::new("server.cfg").unwrap(), b"after")
+            .await
+            .unwrap();
+
+        let after = fs::metadata(&absolute).unwrap();
+        assert_eq!(fs::read(&absolute).unwrap(), b"after");
+        assert_eq!(after.uid(), before.uid());
+        assert_eq!(after.gid(), before.gid());
+        assert_eq!(after.permissions().mode() & 0o7777, 0o640);
+        assert_eq!(fs::read_dir(&directory.0).unwrap().count(), 1);
     }
 
     #[test]
