@@ -58,9 +58,11 @@ use crate::{
         },
     },
     configuration::{
+        application::target::ConfigurationTargetResolver,
         domain::{BinaryExtension, ConfigurationFilePolicy},
         infrastructure::file_service::LocalConfigurationFileService,
     },
+    configuration_targets::ConfigurationTargetCatalog,
     maps::{
         self,
         domain::{MAPS_STORAGE_NAMESPACE, MapFilePolicy},
@@ -155,6 +157,7 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
 
 struct BuiltApplication {
     router: Router,
+    _configuration_target_resolver: Arc<dyn ConfigurationTargetResolver>,
     maintenance_worker: BackupMaintenanceWorker,
     systemd_observer: Option<SystemdObserverWorker>,
     lifecycle_reconciliation: Option<LifecycleReconciliationWorker>,
@@ -189,6 +192,8 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         primary_instance = %instance_registry.primary().id(),
         "server instance registry loaded"
     );
+    let configuration_target_resolver: Arc<dyn ConfigurationTargetResolver> =
+        Arc::new(ConfigurationTargetCatalog::open(&config, instance_registry.clone()).await?);
     let configurator_directory =
         RelativeStoragePath::try_from(config.configuration.files.configurator_directory.as_path())?;
     let maps_directory = RelativeStoragePath::try_from(config.maps.files.directory.as_path())?;
@@ -497,6 +502,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         router: router
             .merge(auth::presentation::openapi_router(openapi))
             .layer(socket_io_layer),
+        _configuration_target_resolver: configuration_target_resolver,
         maintenance_worker,
         systemd_observer,
         lifecycle_reconciliation,

@@ -129,6 +129,10 @@ impl LocalFileStorage {
         self.limits
     }
 
+    pub(crate) fn canonical_root(&self) -> &Path {
+        &self.root
+    }
+
     pub async fn scoped(&self, scope: &RelativeStoragePath) -> Result<Self, LocalFileStorageError> {
         if scope.is_root() {
             return Ok(self.clone());

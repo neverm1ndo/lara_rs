@@ -11,6 +11,7 @@ mod cli;
 // into AppState when its application services and HTTP routes are ready.
 #[allow(dead_code)]
 mod configuration;
+mod configuration_targets;
 // The context also exposes event-publisher and backup integration contracts
 // which intentionally remain unused until those adapters are introduced.
 #[allow(dead_code)]

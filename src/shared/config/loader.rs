@@ -9,7 +9,8 @@ use ::config::{ConfigBuilder, Environment, File, FileFormat, Map, builder::Defau
 use super::{AppConfig, ConfigError};
 use crate::shared::config::model::{
     BackupCompression, EffectiveInstanceConfigurationConfig, FileStorageConfig,
-    InstanceCapabilityConfig, InstanceKindConfig, ServerInstanceConfig,
+    InstanceCapabilityConfig, InstanceConfigurationConfig, InstanceKindConfig,
+    ServerInstanceConfig,
 };
 use crate::shared::file_storage::path::{RelativeStoragePath, StorageFileName};
 
@@ -85,7 +86,22 @@ impl AppConfig {
             ));
         }
 
-        let override_policy = instance.configuration.as_ref();
+        self.resolve_configuration_policy(instance.configuration.as_ref(), &instance.id)
+            .map(Some)
+    }
+
+    /// Effective policy for the implicit primary used by legacy deployments.
+    pub fn implicit_primary_configuration_policy(
+        &self,
+    ) -> Result<EffectiveInstanceConfigurationConfig, ConfigError> {
+        self.resolve_configuration_policy(None, &self.game_server.primary_instance)
+    }
+
+    fn resolve_configuration_policy(
+        &self,
+        override_policy: Option<&InstanceConfigurationConfig>,
+        instance_id: &str,
+    ) -> Result<EffectiveInstanceConfigurationConfig, ConfigError> {
         let defaults = &self.configuration.files;
         let storage = &self.game_server.storage;
         let policy = EffectiveInstanceConfigurationConfig {
@@ -116,11 +132,11 @@ impl AppConfig {
         };
         validate_effective_configuration_policy(&policy, storage).map_err(|reason| {
             ConfigError::InvalidInstanceConfiguration {
-                instance: instance.id.clone(),
+                instance: instance_id.to_owned(),
                 reason,
             }
         })?;
-        Ok(Some(policy))
+        Ok(policy)
     }
 
     /// Loads configuration in ascending priority order:
@@ -892,8 +908,7 @@ fn validate_mfa_encryption_key(value: &str) -> Result<(), ConfigError> {
 mod tests {
     use super::*;
     use crate::shared::config::model::{
-        InstanceConfigurationConfig, InstanceEnvironmentConfig, InstanceManagementConfig,
-        InstanceReadinessConfig,
+        InstanceEnvironmentConfig, InstanceManagementConfig, InstanceReadinessConfig,
     };
 
     type ConfigMutation = Box<dyn Fn(&mut AppConfig)>;
