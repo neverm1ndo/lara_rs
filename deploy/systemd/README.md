@@ -216,6 +216,13 @@ root, его содержимое, drop-in или запущенный проц�
 проверяется полным startup-валидатором, выполняется под file lock, создаёт
 timestamped backup и устанавливается atomic rename.
 
+Для auxiliary с `--capability configuration` CLI добавляет пустую таблицу
+`[game_server.instances.configuration]`: поля наследуются из общих defaults,
+а список разрешённых для загрузки бинарных артефактов остаётся пустым. Для
+уже зарегистрированного auxiliary с этой capability добавьте таблицу в
+production TOML перед следующим запуском Lara; иначе startup validation
+отклонит конфигурацию.
+
 После регистрации drop-in можно сначала проверить, а затем установить отдельной
 командой:
 
@@ -291,6 +298,9 @@ storage_root = "/srv/openmp/dev-dm"
 capabilities = ["overview", "lifecycle", "configuration", "incidents"]
 readiness = "process"
 incident_tracking = true
+
+[game_server.instances.configuration]
+artifact_paths = []
 ```
 
 После изменения overlay перезапустите Lara и проверьте Developer manifest.

@@ -131,6 +131,16 @@ fn edit(args: InstanceEditArgs) -> Result<(), InstanceCliError> {
     }
     if !args.capabilities.is_empty() {
         table["capabilities"] = Item::Value(Value::Array(capability_array(&args.capabilities)));
+        if args
+            .capabilities
+            .contains(&InstanceCapabilityArg::Configuration)
+        {
+            if table.get("configuration").is_none() {
+                table["configuration"] = Item::Table(Table::new());
+            }
+        } else {
+            table.remove("configuration");
+        }
     }
     if let Some(sort_order) = args.sort_order {
         table["sort_order"] = value(i64::from(sort_order));
@@ -1021,6 +1031,12 @@ fn auxiliary_table(args: &InstanceAddArgs) -> Table {
     table["systemd_unit"] = value(unit);
     table["storage_root"] = value(path_value(&args.storage_root));
     table["capabilities"] = Item::Value(Value::Array(capability_array(&args.capabilities)));
+    if args
+        .capabilities
+        .contains(&InstanceCapabilityArg::Configuration)
+    {
+        table["configuration"] = Item::Table(Table::new());
+    }
     table["readiness"] = value("process");
     table["incident_tracking"] = value(true);
     table

@@ -149,6 +149,14 @@ capabilities = [
 readiness = "process"
 incident_tracking = true
 
+# Таблица относится к расположенному непосредственно перед ней auxiliary.
+# Для auxiliary с capability configuration она обязательна.
+[game_server.instances.configuration]
+fallback_encoding = "windows-1251"
+ignored_paths = ["logs", "scriptfiles/cache"]
+artifact_paths = []
+max_file_size_bytes = 10485760
+
 [game_server.storage]
 root = "/srv/openmp/main"
 max_tree_depth = 32
@@ -252,15 +260,20 @@ Diff ограничивается `max_input_size_bytes` и
 
 ## Кодировка файлов configuration API
 
-Файлы конфигурации SAMP/open.mp хранятся в кодировке из
-`configuration.files.fallback_encoding` (`windows-1251` по умолчанию). API не
-перекодирует содержимое и передаёт байты без изменений:
+Файлы конфигурации SAMP/open.mp хранятся в кодировке из эффективной политики
+инстанса (`windows-1251` по умолчанию). `configuration.files` задаёт defaults
+для primary и отсутствующих полей политики auxiliary. API не перекодирует
+содержимое и передаёт байты без изменений. Контракт Release C использует
+маршруты с ID инстанса:
 
-- `GET /configuration/files` возвращает поток с заголовком
-  `Content-Type: text/plain; charset=windows-1251`;
-- `POST /configuration/files` и `PUT /configuration/files` принимают
+- `GET /server-instances/{instance_id}/configuration/files` возвращает поток с
+  `Content-Type: text/plain; charset=<fallback_encoding>`;
+- `POST` и `PUT` на том же маршруте принимают
   `multipart/form-data` с единственной бинарной частью `file`, а путь — в
   query-параметре `path`.
+
+Это контракт для следующих шагов Release C. Пока маршруты не смонтированы,
+runtime `/openapi.json` их не содержит.
 
 Перед записью сервер проверяет, что байты допустимы для настроенной кодировки,
 но сохраняет их без декодирования и повторного кодирования. Клиент может
@@ -272,6 +285,30 @@ Diff ограничивается `max_input_size_bytes` и
 последовательности байтов однобайтовых кодировок по своей природе неоднозначны.
 
 ## Реестр игровых инстансов
+
+### Политика configuration для инстанса
+
+Для auxiliary с capability `configuration` обязательна таблица
+`[game_server.instances.configuration]` непосредственно после соответствующей
+записи `[[game_server.instances]]`. Даже пустая таблица означает явное включение
+политики с безопасными defaults; `lara instance add` создаёт её автоматически.
+Если у существующего auxiliary уже есть эта capability, добавьте таблицу до
+обновления конфигурации: без неё startup validation завершится ошибкой.
+У primary таблица необязательна, поэтому старый `configuration.files` остаётся
+допустимым входом. Таблица для инстанса без capability отклоняется.
+
+Допустимые поля: `fallback_encoding`, `binary_extensions`,
+`binary_file_names`, `ignored_paths`, `artifact_paths`, `max_tree_depth`,
+`max_tree_entries`, `max_file_size_bytes`. Отсутствующие поля наследуют
+`configuration.files` и лимиты `game_server.storage`, кроме `artifact_paths`:
+его default всегда пустой. Лимиты инстанса должны быть положительными и не
+превышать глобальные. Пути в `ignored_paths` и `artifact_paths` задаются
+относительно `storage_root` инстанса; абсолютные пути, `..`, дубликаты,
+пересекающиеся ignored-пути и артефакты внутри ignored subtree отклоняются.
+`artifact_paths` содержит точные пути бинарных файлов; executable, environment,
+секреты, native libraries и systemd-файлы запрещены даже при явном указании.
+Политика уже проверяется при запуске; её применение к файловым операциям
+появится в следующих шагах Release C.
 
 `game_server.primary_instance` ссылается на единственную запись `kind =
 "primary"`. Primary использует `game_server.storage.root`, если `storage_root`

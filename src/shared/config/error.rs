@@ -36,6 +36,12 @@ pub enum ConfigError {
     DuplicateIgnoredPath { path: String },
     #[error("unsupported fallback text encoding `{encoding}`")]
     UnsupportedTextEncoding { encoding: String },
+    #[error("auxiliary instance `{0}` enables configuration but has no configuration policy table")]
+    MissingInstanceConfiguration(String),
+    #[error("instance `{0}` declares configuration policy without the configuration capability")]
+    UnexpectedInstanceConfiguration(String),
+    #[error("invalid configuration policy for instance `{instance}`: {reason}")]
+    InvalidInstanceConfiguration { instance: String, reason: String },
     #[error("backup storage directory must not be inside the managed game-server root")]
     BackupDirectoryInsideGameServerRoot,
     #[error(
