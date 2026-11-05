@@ -135,8 +135,15 @@ pub struct InstanceConfigurationTextFile {
 
 pub struct InstanceConfigurationMutation {
     pub instance_id: String,
+    pub resource_kind: ConfigurationResourceKind,
     pub event: ConfigurationFileChanged,
     pub etag: Option<ConfigurationEntityTag>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConfigurationResourceKind {
+    TextFile,
+    Artifact,
 }
 
 pub type InstanceConfigurationFuture<'a, T> =

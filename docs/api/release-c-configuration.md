@@ -34,9 +34,12 @@ instance and action again.
 
 Paths are slash-separated and relative to the caller's scoped configuration
 root. Binary files are shown in the tree but cannot be modified through text
-routes. Artifact update does not create a missing artifact. No command here
-starts, stops or restarts a game server. Every response containing file data or
-private metadata uses `Cache-Control: no-store`.
+routes. Artifact update does not create a missing artifact. Replacement is
+allowed while the game server is running: it changes the file on disk but does
+not reload or restart the process. The effect on an already loaded mod depends
+on the game server; Developer initiates a separate lifecycle operation when
+needed. Every response containing file data or private metadata uses
+`Cache-Control: no-store`.
 
 ## Conditional writes and retries
 

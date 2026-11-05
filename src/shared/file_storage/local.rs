@@ -328,6 +328,15 @@ impl LocalFileStorage {
         Ok(FileRevision::from_metadata(metadata.len(), modified_at).with_content_hash(hash))
     }
 
+    pub(crate) async fn is_executable_file(
+        &self,
+        path: &RelativeStoragePath,
+    ) -> Result<bool, LocalFileStorageError> {
+        let target = self.resolve_existing_file(path).await?;
+        let metadata = tokio::fs::symlink_metadata(target).await?;
+        Ok(is_executable_metadata(&metadata))
+    }
+
     pub(super) async fn ensure_absent(
         &self,
         path: &RelativeStoragePath,
@@ -367,6 +376,9 @@ impl LocalFileStorage {
         }
         if !original.is_file() {
             return Err(LocalFileStorageError::NotFile);
+        }
+        if is_executable_metadata(&original) {
+            return Err(LocalFileStorageError::ExecutableFile);
         }
         let parent = target.parent().expect("resolved file has a parent");
         let temporary = parent.join(format!(".lara-replace-{}", Uuid::new_v4()));
@@ -591,6 +603,17 @@ fn same_ownership(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
 }
 
 #[cfg(unix)]
+fn is_executable_metadata(metadata: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable_metadata(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn same_permissions(left: &std::fs::Metadata, right: &std::fs::Metadata) -> bool {
     use std::os::unix::fs::PermissionsExt;
     left.permissions().mode() & 0o7777 == right.permissions().mode() & 0o7777
@@ -708,6 +731,8 @@ pub enum LocalFileStorageError {
     ContentTooLarge { maximum: u64 },
     #[error("file changed while its content hash was being read")]
     ChangedDuringRead,
+    #[error("executable files cannot be replaced through file storage")]
+    ExecutableFile,
     #[error("atomic replacement cannot preserve the existing file owner, group or mode")]
     MetadataPreservationUnavailable,
     #[error("file-storage root or scope must not be a symbolic link or reparse point")]

@@ -59,10 +59,12 @@ use crate::{
     },
     configuration::{
         application::{
+            artifact_service::ConfigurationArtifactService,
             instance_text::InstanceConfigurationTextService, target::ConfigurationTargetResolver,
         },
         domain::{BinaryExtension, ConfigurationFilePolicy},
         infrastructure::{
+            artifact_service::LocalConfigurationArtifactService,
             file_service::LocalConfigurationFileService,
             instance_text::LocalInstanceConfigurationTextService,
         },
@@ -164,6 +166,7 @@ struct BuiltApplication {
     router: Router,
     _configuration_target_resolver: Arc<dyn ConfigurationTargetResolver>,
     _instance_text_service: Arc<dyn InstanceConfigurationTextService>,
+    _artifact_service: Arc<dyn ConfigurationArtifactService>,
     maintenance_worker: BackupMaintenanceWorker,
     systemd_observer: Option<SystemdObserverWorker>,
     lifecycle_reconciliation: Option<LifecycleReconciliationWorker>,
@@ -376,6 +379,9 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let instance_text_service: Arc<dyn InstanceConfigurationTextService> = Arc::new(
         LocalInstanceConfigurationTextService::new(backup_provider.clone()),
     );
+    let artifact_service: Arc<dyn ConfigurationArtifactService> = Arc::new(
+        LocalConfigurationArtifactService::new(backup_provider.clone()),
+    );
     let configuration_file_service = LocalConfigurationFileService::new(
         game_server_storage.clone(),
         configuration_policy.clone(),
@@ -522,6 +528,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
             .layer(socket_io_layer),
         _configuration_target_resolver: configuration_target_resolver,
         _instance_text_service: instance_text_service,
+        _artifact_service: artifact_service,
         maintenance_worker,
         systemd_observer,
         lifecycle_reconciliation,

@@ -8,9 +8,10 @@ use crate::{
                 ConfigurationTreeEntry,
             },
             instance_text::{
-                ConfigurationEntityTag, InstanceConfigurationError, InstanceConfigurationFuture,
-                InstanceConfigurationMutation, InstanceConfigurationRequest,
-                InstanceConfigurationTextFile, InstanceConfigurationTextService,
+                ConfigurationEntityTag, ConfigurationResourceKind, InstanceConfigurationError,
+                InstanceConfigurationFuture, InstanceConfigurationMutation,
+                InstanceConfigurationRequest, InstanceConfigurationTextFile,
+                InstanceConfigurationTextService,
             },
         },
         domain::{ConfigurationFileChanged, ConfigurationFileKind},
@@ -72,7 +73,23 @@ impl LocalInstanceConfigurationTextService {
         Ok(())
     }
 
-    async fn current_revision(
+    pub(crate) async fn ensure_non_executable(
+        context: &InstanceConfigurationRequest,
+        path: &RelativeStoragePath,
+    ) -> Result<(), InstanceConfigurationError> {
+        if context
+            .target()
+            .storage()
+            .is_executable_file(path)
+            .await
+            .map_err(map_storage_error)?
+        {
+            return Err(InstanceConfigurationError::NotFound);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn current_revision(
         context: &InstanceConfigurationRequest,
         path: &RelativeStoragePath,
         expected: &ConfigurationEntityTag,
@@ -83,13 +100,16 @@ impl LocalInstanceConfigurationTextService {
             .file_revision(path)
             .await
             .map_err(map_storage_error)?;
+        if revision.size() > context.target().storage().limits().max_stream_size_bytes {
+            return Err(InstanceConfigurationError::ContentTooLarge);
+        }
         if !expected.matches(&revision) {
             return Err(InstanceConfigurationError::PreconditionFailed);
         }
         Ok(revision)
     }
 
-    async fn execute(
+    pub(crate) async fn execute(
         &self,
         context: &InstanceConfigurationRequest,
         request: FileMutationRequest,
@@ -111,12 +131,13 @@ impl LocalInstanceConfigurationTextService {
             .and_then(ConfigurationEntityTag::from_revision);
         Ok(InstanceConfigurationMutation {
             instance_id: context.target().instance_id().to_owned(),
+            resource_kind: ConfigurationResourceKind::TextFile,
             event,
             etag,
         })
     }
 
-    fn destructive_backup(
+    pub(crate) fn destructive_backup(
         context: &InstanceConfigurationRequest,
         primary_requirement: BackupRequirement,
     ) -> BackupRequirement {
@@ -195,6 +216,7 @@ impl InstanceConfigurationTextService for LocalInstanceConfigurationTextService 
     ) -> InstanceConfigurationFuture<'a, InstanceConfigurationTextFile> {
         Box::pin(async move {
             Self::ensure_text(&context, &path)?;
+            Self::ensure_non_executable(&context, &context.access().server_path(&path)).await?;
             let name = path
                 .file_name()
                 .ok_or(InstanceConfigurationError::NotFound)?
@@ -256,6 +278,7 @@ impl InstanceConfigurationTextService for LocalInstanceConfigurationTextService 
             Self::ensure_text(&context, &path)?;
             let content = context.validate_content(content.into_bytes())?;
             let server_path = context.access().server_path(&path);
+            Self::ensure_non_executable(&context, &server_path).await?;
             let revision = Self::current_revision(&context, &server_path, &expected).await?;
             let request = FileMutationRequest::overwrite(
                 self.namespace.clone(),
@@ -283,6 +306,7 @@ impl InstanceConfigurationTextService for LocalInstanceConfigurationTextService 
         Box::pin(async move {
             Self::ensure_text(&context, &path)?;
             let server_path = context.access().server_path(&path);
+            Self::ensure_non_executable(&context, &server_path).await?;
             let revision = Self::current_revision(&context, &server_path, &expected).await?;
             let request = FileMutationRequest::delete(
                 self.namespace.clone(),
@@ -313,6 +337,7 @@ impl InstanceConfigurationTextService for LocalInstanceConfigurationTextService 
             Self::ensure_text(&context, &destination)?;
             let source = context.access().server_path(&source);
             let destination = context.access().server_path(&destination);
+            Self::ensure_non_executable(&context, &source).await?;
             let revision = Self::current_revision(&context, &source, &expected).await?;
             let request = FileMutationRequest::rename(
                 self.namespace.clone(),
@@ -333,11 +358,16 @@ impl InstanceConfigurationTextService for LocalInstanceConfigurationTextService 
     }
 }
 
-fn map_storage_error(error: LocalFileStorageError) -> InstanceConfigurationError {
+pub(crate) fn map_storage_error(error: LocalFileStorageError) -> InstanceConfigurationError {
     match error {
         LocalFileStorageError::Io(error) if error.kind() == io::ErrorKind::NotFound => {
             InstanceConfigurationError::NotFound
         }
+        LocalFileStorageError::NotFile
+        | LocalFileStorageError::RootFile
+        | LocalFileStorageError::LinkOrReparsePoint
+        | LocalFileStorageError::OutsideRoot
+        | LocalFileStorageError::ExecutableFile => InstanceConfigurationError::NotFound,
         LocalFileStorageError::AlreadyExists => InstanceConfigurationError::AlreadyExists,
         LocalFileStorageError::ContentTooLarge { .. } => {
             InstanceConfigurationError::ContentTooLarge
@@ -484,6 +514,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(created.instance_id, "auxiliary");
+        assert_eq!(created.resource_kind, ConfigurationResourceKind::TextFile);
         assert!(created.event.backup_receipt().is_none());
         assert!(roots.path("auxiliary/server.cfg").exists());
         assert!(!roots.path("primary/server.cfg").exists());
@@ -706,5 +737,34 @@ mod tests {
             service.open_text(auxiliary, path(".env")).await,
             Err(InstanceConfigurationError::NotFound)
         ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn executable_text_file_is_not_accessible_or_mutable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let roots = TestRoots::new();
+        let file = roots.path("auxiliary/script.pwn");
+        tokio::fs::write(&file, b"script").await.unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let resolver = resolver(&roots).await;
+        let service = LocalInstanceConfigurationTextService::new(Arc::new(NoBackupProvider));
+        let developer = context(&resolver, "auxiliary", UserRole::Developer).unwrap();
+        assert!(matches!(
+            service
+                .open_text(developer.clone(), path("script.pwn"))
+                .await,
+            Err(InstanceConfigurationError::NotFound)
+        ));
+        let arbitrary_tag =
+            ConfigurationEntityTag::parse(&format!("\"sha256:{}\"", "0".repeat(64))).unwrap();
+        assert!(matches!(
+            service
+                .delete(developer, path("script.pwn"), arbitrary_tag)
+                .await,
+            Err(InstanceConfigurationError::NotFound)
+        ));
+        assert_eq!(tokio::fs::read(file).await.unwrap(), b"script");
     }
 }

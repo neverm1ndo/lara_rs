@@ -856,6 +856,9 @@ fn validate_effective_configuration_policy(
             .rsplit_once('.')
             .map(|(_, extension)| extension);
         if path.components().any(is_protected_artifact_component)
+            || normalized_name.contains(".so.")
+            || normalized_name.contains(".env.")
+            || normalized_name.contains(".service.")
             || extension.is_some_and(is_protected_artifact_extension)
         {
             return Err(format!("artifact path `{path}` targets a protected file"));
@@ -883,7 +886,18 @@ fn is_protected_artifact_component(component: &str) -> bool {
 fn is_protected_artifact_extension(extension: &str) -> bool {
     matches!(
         extension,
-        "env" | "so" | "dll" | "exe" | "service" | "socket" | "key" | "pem" | "p12" | "pfx"
+        "env"
+            | "so"
+            | "dll"
+            | "exe"
+            | "dylib"
+            | "bundle"
+            | "service"
+            | "socket"
+            | "key"
+            | "pem"
+            | "p12"
+            | "pfx"
     )
 }
 
@@ -1137,6 +1151,20 @@ mod tests {
                 Err(ConfigError::InvalidInstanceConfiguration { instance, .. }) if instance == "test"
             ));
         }
+    }
+
+    #[test]
+    fn rejects_versioned_native_library_even_if_binary_name_is_allowlisted() {
+        let mut config = valid_config();
+        let mut auxiliary = auxiliary_with_configuration();
+        let policy = auxiliary.configuration.as_mut().unwrap();
+        policy.binary_file_names = Some(vec!["native.so.1".into()]);
+        policy.artifact_paths = vec!["plugins/native.so.1".into()];
+        config.game_server.instances.push(auxiliary);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidInstanceConfiguration { reason, .. }) if reason.contains("protected")
+        ));
     }
 
     #[test]
