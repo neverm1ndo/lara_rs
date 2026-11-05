@@ -58,7 +58,6 @@ use crate::{
         },
     },
     configuration::{
-        self,
         domain::{BinaryExtension, ConfigurationFilePolicy},
         infrastructure::file_service::LocalConfigurationFileService,
     },
@@ -488,10 +487,6 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let (router, openapi) = OpenApiRouter::<AppState>::with_openapi(openapi)
         .merge(server_instances::presentation::router::<AppState>())
         .nest("/auth", auth::presentation::mfa_router::<AppState>())
-        .nest(
-            "/configuration",
-            configuration::presentation::router::<AppState>(),
-        )
         .nest("/maps", maps::presentation::router::<AppState>())
         .nest("/backups", backups::presentation::router::<AppState>())
         .nest("/user", user::presentation::router::<AppState>())
@@ -511,7 +506,6 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
 
 fn base_openapi_document() -> utoipa::openapi::OpenApi {
     auth::presentation::openapi_document()
-        .merge_from(configuration::presentation::openapi_document())
         .merge_from(maps::presentation::openapi_document())
         .merge_from(backups::presentation::openapi_document())
         .merge_from(server_instances::presentation::openapi_document())
@@ -528,6 +522,12 @@ async fn shutdown_signal() {
 mod tests {
     use std::sync::Arc;
 
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use serde_json::Value;
+    use tower::ServiceExt;
     use utoipa_axum::router::OpenApiRouter;
 
     use super::*;
@@ -541,12 +541,6 @@ mod tests {
         },
         backups::{
             application::lifecycle::BackupLifecycleService, presentation::state::BackupsState,
-        },
-        configuration::{
-            application::file_service::ConfigurationFileService,
-            presentation::{
-                authorization::ConfigurationAuthorizationState, state::ConfigurationState,
-            },
         },
         maps::{application::file_service::MapsFileService, presentation::state::MapsState},
         server_instances::{
@@ -589,26 +583,6 @@ mod tests {
         }
     }
 
-    impl ConfigurationAuthorizationState for DocumentationState {
-        fn configurator_directory(&self) -> &RelativeStoragePath {
-            panic!("documentation generation does not resolve configuration")
-        }
-    }
-
-    impl ConfigurationState for DocumentationState {
-        fn configuration_file_service(&self) -> Arc<dyn ConfigurationFileService> {
-            panic!("documentation generation does not resolve application services")
-        }
-
-        fn configuration_file_encoding(&self) -> &'static Encoding {
-            encoding_rs::WINDOWS_1251
-        }
-
-        fn configuration_file_upload_limit_bytes(&self) -> u64 {
-            10 * 1024 * 1024
-        }
-    }
-
     impl BackupsState for DocumentationState {
         fn backup_lifecycle_service(&self) -> Arc<BackupLifecycleService> {
             panic!("documentation generation does not resolve application services")
@@ -635,16 +609,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn global_openapi_document_contains_domain_routes() {
-        let document = OpenApiRouter::<DocumentationState>::with_openapi(base_openapi_document())
+    fn documented_routes() -> OpenApiRouter<DocumentationState> {
+        OpenApiRouter::<DocumentationState>::with_openapi(base_openapi_document())
             .merge(crate::server_instances::presentation::router())
             .nest("/auth", auth::presentation::mfa_router())
-            .nest("/configuration", configuration::presentation::router())
             .nest("/maps", maps::presentation::router())
             .nest("/backups", backups::presentation::router())
             .nest("/user", user::presentation::router())
-            .into_openapi();
+    }
+
+    #[test]
+    fn global_openapi_document_contains_domain_routes_without_legacy_configuration() {
+        let document = documented_routes().into_openapi();
         let specification = serde_json::to_value(document).unwrap();
 
         assert_eq!(specification["openapi"], "3.1.0");
@@ -654,8 +630,12 @@ mod tests {
         assert!(specification["paths"]["/auth/mfa"]["get"].is_object());
         assert!(specification["paths"]["/auth/mfa/totp"]["delete"].is_object());
         assert!(specification["paths"]["/maps/tree"]["get"].is_object());
-        assert!(specification["paths"]["/configuration/tree"]["get"].is_object());
-        assert!(specification["paths"]["/configuration/files"]["post"].is_object());
+        assert!(specification["paths"]["/configuration/tree"].is_null());
+        assert!(specification["paths"]["/configuration/files"].is_null());
+        assert!(specification["paths"]["/configuration/files/rename"].is_null());
+        assert!(
+            specification["paths"]["/server-instances/{instance_id}/configuration/tree"].is_null()
+        );
         assert!(specification["paths"]["/maps/files"]["post"].is_object());
         assert!(specification["paths"]["/backups/list"]["get"].is_object());
         assert!(specification["paths"]["/backups/backup/{backup_id}"]["get"].is_object());
@@ -669,5 +649,127 @@ mod tests {
             specification["components"]["securitySchemes"]["bearerAuth"]["scheme"],
             "bearer"
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_configuration_route_returns_not_found() {
+        let (router, _) = documented_routes()
+            .with_state(DocumentationState)
+            .split_for_parts();
+        for uri in [
+            "/configuration/tree",
+            "/configuration/files?path=server.cfg",
+            "/configuration/files/rename",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+    }
+
+    fn assert_contract_references_exist(document: &Value, node: &Value) {
+        match node {
+            Value::Object(fields) => {
+                if let Some(reference) = fields.get("$ref").and_then(Value::as_str) {
+                    let pointer = reference.strip_prefix('#').expect("local reference");
+                    assert!(
+                        document.pointer(pointer).is_some(),
+                        "unresolved {reference}"
+                    );
+                }
+                for value in fields.values() {
+                    assert_contract_references_exist(document, value);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    assert_contract_references_exist(document, item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn release_c_contract_freezes_scoped_paths_headers_and_errors() {
+        let contract: Value = serde_json::from_str(include_str!(
+            "../docs/api/release-c-configuration.openapi.json"
+        ))
+        .unwrap();
+        assert_eq!(contract["openapi"], "3.1.0");
+        assert_eq!(contract["security"][0]["bearerAuth"], serde_json::json!([]));
+        assert_contract_references_exist(&contract, &contract);
+
+        let paths = contract["paths"].as_object().unwrap();
+        assert_eq!(paths.len(), 4);
+        assert!(
+            paths
+                .keys()
+                .all(|path| path.starts_with("/server-instances/{instance_id}/configuration/"))
+        );
+        let tree = &contract["paths"]["/server-instances/{instance_id}/configuration/tree"];
+        let files = &contract["paths"]["/server-instances/{instance_id}/configuration/files"];
+        let rename =
+            &contract["paths"]["/server-instances/{instance_id}/configuration/files/rename"];
+        let artifacts =
+            &contract["paths"]["/server-instances/{instance_id}/configuration/artifacts"];
+        assert!(tree["get"].is_object());
+        for method in ["get", "post", "put", "delete"] {
+            assert!(files[method].is_object(), "missing files {method}");
+        }
+        assert!(rename["patch"].is_object());
+        assert!(artifacts["head"].is_object());
+        assert!(artifacts["put"].is_object());
+
+        for operation in [
+            &files["post"],
+            &files["put"],
+            &files["delete"],
+            &rename["patch"],
+            &artifacts["put"],
+        ] {
+            let parameters = operation["parameters"].as_array().unwrap();
+            assert!(
+                parameters
+                    .iter()
+                    .any(|parameter| parameter["$ref"] == "#/components/parameters/IdempotencyKey")
+            );
+            assert!(operation["responses"]["409"].is_object());
+        }
+        for operation in [
+            &files["put"],
+            &files["delete"],
+            &rename["patch"],
+            &artifacts["put"],
+        ] {
+            let parameters = operation["parameters"].as_array().unwrap();
+            assert!(
+                parameters
+                    .iter()
+                    .any(|parameter| parameter["$ref"] == "#/components/parameters/IfMatch")
+            );
+            assert!(operation["responses"]["412"].is_object());
+            assert!(operation["responses"]["428"].is_object());
+        }
+        assert_eq!(
+            files["get"]["responses"]["200"]["$ref"],
+            "#/components/responses/TextFile"
+        );
+        assert_eq!(
+            artifacts["head"]["responses"]["200"]["$ref"],
+            "#/components/responses/ArtifactMetadata"
+        );
+        assert_eq!(
+            artifacts["put"]["x-lara-roles"],
+            serde_json::json!(["Developer"])
+        );
+        assert_eq!(
+            artifacts["head"]["x-lara-roles"],
+            serde_json::json!(["Developer"])
+        );
+        assert!(contract["paths"]["/configuration/files"].is_null());
     }
 }

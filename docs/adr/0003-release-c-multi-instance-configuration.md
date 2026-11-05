@@ -74,8 +74,15 @@ POST   /server-instances/{instance_id}/configuration/files?path=...
 PUT    /server-instances/{instance_id}/configuration/files?path=...
 DELETE /server-instances/{instance_id}/configuration/files?path=...
 PATCH  /server-instances/{instance_id}/configuration/files/rename
+HEAD   /server-instances/{instance_id}/configuration/artifacts?path=...
 PUT    /server-instances/{instance_id}/configuration/artifacts?path=...
 ```
+
+Точные DTO, заголовки, коды ошибок и поведение повторных запросов зафиксированы
+в [контракте Release C](../api/release-c-configuration.md) и отдельной
+[OpenAPI 3.1 спецификации](../api/release-c-configuration.openapi.json). Она
+публикуется как контракт для разработки; runtime `/openapi.json` содержит
+только уже смонтированные операции.
 
 Если для минимально полезного файлового менеджера понадобятся директории,
 добавляется отдельный ресурс `/directories`: создание, переименование и
@@ -92,6 +99,8 @@ Binary artifact upload отделён от текстового `files` API. Т�
 проверяет configured encoding и не транскодирует байты. Artifact endpoint
 принимает opaque bytes, доступен только Developer и только для точного пути,
 присутствующего в allowlist данного инстанса.
+`HEAD /artifacts` возвращает размер и `ETag` существующего allowlisted файла,
+чтобы клиент получил precondition для обновления без скачивания бинарных байтов.
 
 ### Порт разрешения configuration target
 
@@ -288,7 +297,7 @@ filesystem границы и отсутствие symlink, но не измен�
 
 - принять этот ADR после review backend/frontend/infrastructure;
 - зафиксировать canonical routes, error codes, ETag/If-Match и event envelope;
-- зафиксировать отсутствие legacy `/configuration/...` routes;
+- убрать legacy `/configuration/...` из production router и OpenAPI;
 - добавить API contract tests до production wiring.
 
 Результат: согласованный OpenAPI 3.1 контракт без изменений host state.
@@ -320,7 +329,8 @@ filesystem границы и отсутствие symlink, но не измен�
 - сохранить primary backup behavior;
 - отключить snapshots для auxiliary;
 - добавить ETag/If-Match и atomic replace;
-- удалить старые routes из production router и общей OpenAPI-схемы.
+- придерживаться зафиксированного canonical route contract при миграции
+  файлового сервиса.
 
 Результат: один сервис безопасно работает с primary и несколькими auxiliary.
 
