@@ -65,6 +65,15 @@ boot ID и journald cursor для journal; для live D-Bus — сравнен�
 причину (`journal_unavailable`, `cursor_expired`, `permission_denied` и т.п.)
 и время обнаружения. Gap не является инцидентом игрового процесса.
 
+На шаге 3 созданы MongoDB collections `server_instance_incidents` и
+`server_instance_incident_checkpoints`. Уникальный multikey index по ключам
+фактов не позволяет поместить один факт в разные инциденты; отдельный индекс
+ограничивает число активных инцидентов одним на instance. Версия агрегата
+обновляется через compare-and-swap. Outbox хранится внутри записи инцидента
+и пополняется тем же атомарным update; после истечения аренды событие можно
+выдать повторно с прежним `eventId`. Checkpoint обновляется отдельным CAS и
+должен продвигаться только после долговечной обработки journal entry.
+
 ## Переходы и классификация
 
 Operational state: `open -> recovering -> resolved`; при кратком отказе

@@ -9,7 +9,7 @@ pub use capabilities::{InstanceCapabilities, InstanceCapability};
 pub use incident::{
     Incident, IncidentCause, IncidentChange, IncidentConfidence, IncidentEvidence, IncidentFactId,
     IncidentId, IncidentKind, IncidentOperationalState, IncidentReviewEntry, IncidentReviewState,
-    IncidentReviewerId, IncidentUnitName, InvalidIncident,
+    IncidentReviewerId, IncidentSnapshot, IncidentUnitName, InvalidIncident,
 };
 pub use instance::{
     InstanceClassification, InstanceEnvironment, InstanceKind, InstanceManagement,

@@ -124,6 +124,9 @@ capability manifest служит навигации.
    checkpoint допускается только после записи относящихся к нему фактов;
    повтор после сбоя безопасен. Результат: integration tests индексов,
    конкурентного upsert, повторного события и восстановления outbox.
+   Репозиторий, индексы, CAS, встроенный outbox и checkpoint реализованы;
+   MongoDB integration test выполнен на локальном standalone. Обработка
+   observation facts и продвижение checkpoint подключаются в шагах 4–5.
 
 4. **Классификация live-наблюдений.** Передавать нормализованные snapshots
    существующего D-Bus observer в application service через порт, не привязывая

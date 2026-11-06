@@ -1,6 +1,7 @@
 use std::{fmt, str::FromStr};
 
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -104,28 +105,32 @@ impl IncidentFactId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IncidentKind {
     Outage,
     UnexpectedRestart,
     UnplannedStop,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IncidentOperationalState {
     Open,
     Recovering,
     Resolved,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IncidentReviewState {
     Unreviewed,
     Acknowledged,
     Investigated,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IncidentCause {
     ExitCode,
     Signal,
@@ -152,7 +157,8 @@ impl From<TerminationKind> for IncidentCause {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum IncidentConfidence {
     Confirmed,
     Inferred,
@@ -268,6 +274,26 @@ pub struct IncidentReviewEntry {
 }
 
 impl IncidentReviewEntry {
+    pub fn rehydrate(
+        reviewer_id: IncidentReviewerId,
+        state: IncidentReviewState,
+        note: String,
+        at: DateTime<Utc>,
+    ) -> Result<Self, InvalidIncident> {
+        if state == IncidentReviewState::Unreviewed
+            || note.trim().is_empty()
+            || note.len() > MAX_REVIEW_NOTE_BYTES
+        {
+            return Err(InvalidIncident::ReviewNote);
+        }
+        Ok(Self {
+            reviewer_id,
+            state,
+            note,
+            at,
+        })
+    }
+
     pub const fn reviewer_id(&self) -> IncidentReviewerId {
         self.reviewer_id
     }
@@ -307,9 +333,164 @@ pub struct Incident {
     evidence: Vec<IncidentEvidence>,
     related_operation_ids: Vec<LifecycleOperationId>,
     review_history: Vec<IncidentReviewEntry>,
+    last_change_actor: Option<IncidentReviewerId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncidentSnapshot {
+    pub id: IncidentId,
+    pub instance_id: ServerInstanceId,
+    pub kind: IncidentKind,
+    pub cause: IncidentCause,
+    pub confidence: IncidentConfidence,
+    pub operational_state: IncidentOperationalState,
+    pub review_state: IncidentReviewState,
+    pub opened_at: DateTime<Utc>,
+    pub recovered_at: Option<DateTime<Utc>>,
+    pub updated_at: DateTime<Utc>,
+    pub version: u64,
+    pub evidence: Vec<IncidentEvidence>,
+    pub related_operation_ids: Vec<LifecycleOperationId>,
+    pub review_history: Vec<IncidentReviewEntry>,
+    pub last_change_actor: Option<IncidentReviewerId>,
 }
 
 impl Incident {
+    pub fn snapshot(&self) -> IncidentSnapshot {
+        IncidentSnapshot {
+            id: self.id,
+            instance_id: self.instance_id.clone(),
+            kind: self.kind,
+            cause: self.cause,
+            confidence: self.confidence,
+            operational_state: self.operational_state,
+            review_state: self.review_state,
+            opened_at: self.opened_at,
+            recovered_at: self.recovered_at,
+            updated_at: self.updated_at,
+            version: self.version,
+            evidence: self.evidence.clone(),
+            related_operation_ids: self.related_operation_ids.clone(),
+            review_history: self.review_history.clone(),
+            last_change_actor: self.last_change_actor,
+        }
+    }
+
+    pub fn rehydrate(snapshot: IncidentSnapshot) -> Result<Self, InvalidIncident> {
+        let opening = snapshot.evidence.first().ok_or(InvalidIncident::Evidence)?;
+        let baseline = Self::open(
+            snapshot.id,
+            snapshot.instance_id.clone(),
+            snapshot.kind,
+            opening.clone(),
+        )?;
+        if snapshot.opened_at != baseline.opened_at
+            || snapshot.cause != baseline.cause
+            || snapshot.confidence != baseline.confidence
+            || snapshot.updated_at < snapshot.opened_at
+        {
+            return Err(InvalidIncident::Evidence);
+        }
+        let mut facts = std::collections::HashSet::new();
+        for evidence in &snapshot.evidence {
+            if !facts.insert(evidence.fact_id())
+                || evidence.unit_name() != opening.unit_name()
+                || evidence.occurred_at() < snapshot.opened_at
+                || evidence.occurred_at() > snapshot.updated_at
+            {
+                return Err(InvalidIncident::Evidence);
+            }
+        }
+        let timeline_valid = match snapshot.operational_state {
+            IncidentOperationalState::Open => {
+                snapshot.recovered_at.is_none() && snapshot.evidence.len() == 1
+            }
+            IncidentOperationalState::Recovering => {
+                snapshot.recovered_at.is_none()
+                    && snapshot.evidence.len() == 2
+                    && snapshot.evidence[1].process() == ProcessState::Activating
+            }
+            IncidentOperationalState::Resolved => {
+                snapshot.recovered_at == snapshot.evidence.last().map(IncidentEvidence::occurred_at)
+                    && if snapshot.kind == IncidentKind::UnexpectedRestart {
+                        snapshot.evidence.len() == 1
+                    } else {
+                        (2..=3).contains(&snapshot.evidence.len())
+                            && snapshot
+                                .evidence
+                                .last()
+                                .is_some_and(|e| e.process() == ProcessState::Active)
+                    }
+            }
+        };
+        if !timeline_valid {
+            return Err(InvalidIncident::Transition);
+        }
+        let mut linked = std::collections::HashSet::new();
+        if snapshot
+            .related_operation_ids
+            .iter()
+            .any(|id| !linked.insert(id))
+        {
+            return Err(InvalidIncident::Evidence);
+        }
+        let mut review_state = IncidentReviewState::Unreviewed;
+        let mut previous_at = snapshot.opened_at;
+        for entry in &snapshot.review_history {
+            if !matches!(
+                (review_state, entry.state),
+                (
+                    IncidentReviewState::Unreviewed,
+                    IncidentReviewState::Acknowledged
+                ) | (
+                    IncidentReviewState::Acknowledged,
+                    IncidentReviewState::Investigated
+                )
+            ) || entry.at < previous_at
+                || entry.at > snapshot.updated_at
+            {
+                return Err(InvalidIncident::Transition);
+            }
+            review_state = entry.state;
+            previous_at = entry.at;
+        }
+        if review_state != snapshot.review_state {
+            return Err(InvalidIncident::Transition);
+        }
+        if snapshot.last_change_actor.is_some()
+            && snapshot.last_change_actor
+                != snapshot
+                    .review_history
+                    .last()
+                    .map(|entry| entry.reviewer_id())
+        {
+            return Err(InvalidIncident::Transition);
+        }
+        let expected_version = snapshot.evidence.len() - 1
+            + snapshot.related_operation_ids.len()
+            + snapshot.review_history.len();
+        if usize::try_from(snapshot.version) != Ok(expected_version) {
+            return Err(InvalidIncident::VersionOverflow);
+        }
+        Ok(Self {
+            id: snapshot.id,
+            instance_id: snapshot.instance_id,
+            kind: snapshot.kind,
+            cause: snapshot.cause,
+            confidence: snapshot.confidence,
+            operational_state: snapshot.operational_state,
+            review_state: snapshot.review_state,
+            opened_at: snapshot.opened_at,
+            recovered_at: snapshot.recovered_at,
+            updated_at: snapshot.updated_at,
+            version: snapshot.version,
+            evidence: snapshot.evidence,
+            related_operation_ids: snapshot.related_operation_ids,
+            review_history: snapshot.review_history,
+            last_change_actor: snapshot.last_change_actor,
+        })
+    }
+
     pub fn open(
         id: IncidentId,
         instance_id: ServerInstanceId,
@@ -349,6 +530,7 @@ impl Incident {
             evidence: vec![opening],
             related_operation_ids: Vec::new(),
             review_history: Vec::new(),
+            last_change_actor: None,
         })
     }
 
@@ -367,6 +549,7 @@ impl Incident {
         }
         self.append_evidence(evidence, at)?;
         self.operational_state = IncidentOperationalState::Recovering;
+        self.last_change_actor = None;
         Ok(IncidentChange::Applied)
     }
 
@@ -388,6 +571,7 @@ impl Incident {
         self.append_evidence(evidence, at)?;
         self.operational_state = IncidentOperationalState::Resolved;
         self.recovered_at = Some(recovered_at);
+        self.last_change_actor = None;
         Ok(IncidentChange::Applied)
     }
 
@@ -431,6 +615,7 @@ impl Incident {
         }
         self.advance(at)?;
         self.related_operation_ids.push(operation_id);
+        self.last_change_actor = None;
         Ok(IncidentChange::Applied)
     }
 
@@ -487,6 +672,7 @@ impl Incident {
             note,
             at,
         });
+        self.last_change_actor = Some(reviewer_id);
         Ok(())
     }
 
@@ -548,6 +734,9 @@ impl Incident {
     }
     pub fn review_history(&self) -> &[IncidentReviewEntry] {
         &self.review_history
+    }
+    pub const fn last_change_actor(&self) -> Option<IncidentReviewerId> {
+        self.last_change_actor
     }
 }
 

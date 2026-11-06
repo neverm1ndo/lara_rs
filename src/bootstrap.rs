@@ -90,6 +90,7 @@ use crate::{
         },
         infrastructure::{
             config_registry::ConfiguredInstanceRegistry,
+            incident_repository::MongoIncidentRepository,
             lifecycle_event_dispatcher::LifecycleEventDispatcher,
             lifecycle_operation_repository::MongoLifecycleOperationRepository,
             lifecycle_operation_support::{
@@ -288,6 +289,8 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         mongo_database.clone(),
     ));
     lifecycle_operations.ensure_indexes().await?;
+    let incidents = MongoIncidentRepository::new(mongo_database.clone());
+    incidents.ensure_indexes().await?;
     let recovered_events = lifecycle_operations.recover_missing_events().await?;
     if recovered_events > 0 {
         info!(recovered_events, "recovered lifecycle outbox events");
