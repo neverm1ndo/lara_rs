@@ -60,13 +60,17 @@ use crate::{
     configuration::{
         application::{
             artifact_service::ConfigurationArtifactService,
-            instance_text::InstanceConfigurationTextService, target::ConfigurationTargetResolver,
+            instance_text::InstanceConfigurationTextService,
+            mutation_log::ConfigurationMutationLog, mutation_service::ConfigurationMutationService,
+            target::ConfigurationTargetResolver,
         },
         domain::{BinaryExtension, ConfigurationFilePolicy},
         infrastructure::{
             artifact_service::LocalConfigurationArtifactService,
+            event_dispatcher::ConfigurationEventDispatcher,
             file_service::LocalConfigurationFileService,
             instance_text::LocalInstanceConfigurationTextService,
+            mutation_log::MongoConfigurationMutationLog,
         },
     },
     configuration_targets::ConfigurationTargetCatalog,
@@ -138,6 +142,11 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
             .lifecycle_event_dispatcher
             .run(shutdown_rx.clone()),
     );
+    let configuration_events = tokio::spawn(
+        application
+            .configuration_event_dispatcher
+            .run(shutdown_rx.clone()),
+    );
     let lifecycle_reconciliation = application
         .lifecycle_reconciliation
         .map(|worker| tokio::spawn(worker.run(shutdown_rx.clone())));
@@ -152,6 +161,7 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let _ = shutdown_tx.send(true);
     maintenance.await?;
     lifecycle_events.await?;
+    configuration_events.await?;
     if let Some(observer) = systemd_observer {
         observer.await?;
     }
@@ -168,6 +178,7 @@ struct BuiltApplication {
     systemd_observer: Option<SystemdObserverWorker>,
     lifecycle_reconciliation: Option<LifecycleReconciliationWorker>,
     lifecycle_event_dispatcher: LifecycleEventDispatcher,
+    configuration_event_dispatcher: ConfigurationEventDispatcher,
 }
 
 async fn build_application(config: AppConfig) -> Result<BuiltApplication, BootstrapError> {
@@ -336,7 +347,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         Arc::clone(&mfa_clock),
     ));
 
-    let backup_repository = Arc::new(MongoBackupRepository::new(mongo_database));
+    let backup_repository = Arc::new(MongoBackupRepository::new(mongo_database.clone()));
     backup_repository.ensure_indexes().await?;
     let snapshot_store = Arc::new(
         LocalBackupSnapshotStore::initialize(
@@ -379,6 +390,29 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     let artifact_service: Arc<dyn ConfigurationArtifactService> = Arc::new(
         LocalConfigurationArtifactService::new(backup_provider.clone()),
     );
+    let mutation_log = Arc::new(MongoConfigurationMutationLog::new(mongo_database));
+    mutation_log.ensure_indexes().await?;
+    let mutation_log_port: Arc<dyn ConfigurationMutationLog> = mutation_log;
+    let configuration_mutation_service = Arc::new(ConfigurationMutationService::new(
+        mutation_log_port.clone(),
+        instance_text_service.clone(),
+        artifact_service.clone(),
+    ));
+    let recovery = configuration_mutation_service
+        .reconcile_unresolved()
+        .await?;
+    if recovery.resumable > 0 {
+        info!(
+            resumable = recovery.resumable,
+            "configuration mutations can resume with their original keys"
+        );
+    }
+    if recovery.review_required > 0 {
+        tracing::warn!(
+            review_required = recovery.review_required,
+            "configuration mutations require review after restart"
+        );
+    }
     let configuration_file_service = LocalConfigurationFileService::new(
         game_server_storage.clone(),
         configuration_policy.clone(),
@@ -444,7 +478,15 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         authenticated_users.clone(),
         session_protection,
     ));
-    let (socket_io_layer, socket_delivery) = configure_socket_io(authenticator.clone());
+    let (socket_io_layer, socket_delivery, io) = configure_socket_io(authenticator.clone());
+    let configuration_delivery = crate::configuration::presentation::realtime::configure(
+        &io,
+        authenticator.clone(),
+        instance_registry.primary().id().to_string(),
+        configurator_directory.clone(),
+    );
+    let configuration_event_dispatcher =
+        ConfigurationEventDispatcher::new(mutation_log_port, configuration_delivery);
     let lifecycle_event_delivery: Arc<dyn LifecycleEventDelivery> = socket_delivery;
     let lifecycle_event_dispatcher = LifecycleEventDispatcher::new(
         lifecycle_event_outbox,
@@ -504,6 +546,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         configuration_target_resolver,
         instance_text_service,
         artifact_service,
+        configuration_mutation_service,
         configuration_encoding,
         storage_limits.max_stream_size_bytes,
         maps_file_service,
@@ -531,6 +574,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         systemd_observer,
         lifecycle_reconciliation,
         lifecycle_event_dispatcher,
+        configuration_event_dispatcher,
     })
 }
 
@@ -652,6 +696,9 @@ mod tests {
         fn artifact_service(&self) -> Arc<dyn ConfigurationArtifactService> {
             panic!("documentation only")
         }
+        fn configuration_mutation_service(&self) -> Arc<ConfigurationMutationService> {
+            panic!("documentation only")
+        }
     }
 
     fn documented_routes() -> OpenApiRouter<DocumentationState> {
@@ -693,6 +740,16 @@ mod tests {
                 assert!(specification["paths"][format!("{base}{suffix}")][method].is_object());
             }
         }
+        assert!(
+            specification["paths"][format!("{base}/files")]["post"]["responses"]["201"].is_object()
+        );
+        assert!(
+            specification["paths"][format!("{base}/files")]["put"]["responses"]["200"].is_object()
+        );
+        assert!(
+            specification["paths"][format!("{base}/artifacts")]["put"]["responses"]["200"]
+                .is_object()
+        );
         assert!(specification["paths"]["/maps/files"]["post"].is_object());
         assert!(specification["paths"]["/backups/list"]["get"].is_object());
         assert!(specification["paths"]["/backups/backup/{backup_id}"]["get"].is_object());

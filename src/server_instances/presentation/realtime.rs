@@ -37,7 +37,7 @@ struct RealtimeAuthentication {
 
 pub fn configure_socket_io(
     authenticator: Arc<dyn AuthenticateBearerToken>,
-) -> (SocketIoLayer, Arc<SocketLifecycleEventDelivery>) {
+) -> (SocketIoLayer, Arc<SocketLifecycleEventDelivery>, SocketIo) {
     let (layer, io) = SocketIo::new_layer();
     io.ns(
         "/",
@@ -63,8 +63,8 @@ pub fn configure_socket_io(
             }
         },
     );
-    let delivery = Arc::new(SocketLifecycleEventDelivery { io });
-    (layer, delivery)
+    let delivery = Arc::new(SocketLifecycleEventDelivery { io: io.clone() });
+    (layer, delivery, io)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

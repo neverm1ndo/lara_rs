@@ -3,7 +3,7 @@
   "info": {
     "title": "Lara Release C configuration contract",
     "version": "1.0.0",
-    "description": "Full Release C contract for the instance-scoped configuration API. Read operations are mounted at step 6; mutating routes return 503 until durable mutation handling is connected in step 7."
+    "description": "Release C contract for the instance-scoped configuration API. Mutations use a durable MongoDB intent and embedded outbox. Interrupted Applying records require operator reconciliation before retry."
   },
   "security": [{ "bearerAuth": [] }],
   "paths": {

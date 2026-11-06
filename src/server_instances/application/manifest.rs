@@ -95,7 +95,9 @@ pub enum FeaturePermission {
     Read,
     Browse,
     ReadText,
+    WriteText,
     InspectArtifact,
+    UpdateArtifact,
     Start,
     Stop,
     Restart,
@@ -111,7 +113,9 @@ impl FeaturePermission {
             Self::Read => "read",
             Self::Browse => "browse",
             Self::ReadText => "read_text",
+            Self::WriteText => "write_text",
             Self::InspectArtifact => "inspect_artifact",
+            Self::UpdateArtifact => "update_artifact",
             Self::Start => "start",
             Self::Stop => "stop",
             Self::Restart => "restart",
@@ -206,10 +210,16 @@ fn permissions_for(
         InstanceCapability::Configuration if developer => vec![
             FeaturePermission::Browse,
             FeaturePermission::ReadText,
+            FeaturePermission::WriteText,
             FeaturePermission::InspectArtifact,
+            FeaturePermission::UpdateArtifact,
         ],
         InstanceCapability::Configuration if subject.has_role(UserRole::Configurator) => {
-            vec![FeaturePermission::Browse, FeaturePermission::ReadText]
+            vec![
+                FeaturePermission::Browse,
+                FeaturePermission::ReadText,
+                FeaturePermission::WriteText,
+            ]
         }
         InstanceCapability::Maps if developer || subject.has_role(UserRole::Mapper) => {
             vec![FeaturePermission::Read, FeaturePermission::Write]
@@ -364,7 +374,9 @@ mod tests {
             [
                 FeaturePermission::Browse,
                 FeaturePermission::ReadText,
-                FeaturePermission::InspectArtifact
+                FeaturePermission::WriteText,
+                FeaturePermission::InspectArtifact,
+                FeaturePermission::UpdateArtifact
             ]
         );
     }
@@ -387,7 +399,11 @@ mod tests {
             if role == UserRole::Configurator {
                 assert_eq!(
                     features[&FeatureId::Configuration].permissions,
-                    [FeaturePermission::Browse, FeaturePermission::ReadText]
+                    [
+                        FeaturePermission::Browse,
+                        FeaturePermission::ReadText,
+                        FeaturePermission::WriteText
+                    ]
                 );
             }
         }

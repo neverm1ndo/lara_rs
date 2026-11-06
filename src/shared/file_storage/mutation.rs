@@ -384,6 +384,12 @@ impl FileMutationRequest {
         self.mutation_id
     }
 
+    /// Reuse the ID reserved by a durable intent before a filesystem side effect.
+    pub fn with_mutation_id(mut self, mutation_id: MutationId) -> Self {
+        self.mutation_id = mutation_id;
+        self
+    }
+
     pub fn namespace(&self) -> &StorageNamespace {
         &self.namespace
     }

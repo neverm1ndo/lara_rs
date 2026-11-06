@@ -3,15 +3,18 @@
 Status: accepted design contract. The accompanying
 [OpenAPI 3.1 document](release-c-configuration.openapi.json) is a contract
 fixture for implementation and client development. The production `/openapi.json`
-contains only mounted endpoints. The Release C routes appear there when the
-instance-scoped service is wired in step 6.
+contains only mounted endpoints. Instance-scoped read and write routes are
+mounted. The manifest advertises `browse`, `read_text`, `write_text`, and the
+Developer-only `inspect_artifact` and `update_artifact` actions.
 
-Implementation checkpoint (step 6): the instance-scoped tree, text read and
-artifact metadata routes are mounted. Mutation routes are present but return
-`503 SERVICE_UNAVAILABLE` after authorization until step 7 connects durable
-intent, audit and retry handling. The live manifest advertises only available
-read actions (`browse`, `read_text`, and Developer-only `inspect_artifact`).
-The JSON fixture describes the completed Release C contract.
+An interrupted mutation is recovered conservatively: a persisted `Requested`
+record can resume when the same key and request are submitted again. An
+`Applying` record becomes `ReconciliationRequired` and keeps its path lock.
+A matching file hash alone cannot prove that the operation never ran: a file
+could have been changed and restored. Lara does not repeat an uncertain
+filesystem side effect. Operator review is required before unlocking that
+path. Automatic evidence-based completion remains a follow-up because the
+backup receipt and full event evidence may be unavailable after a crash.
 
 ## Routing and access
 
@@ -109,6 +112,14 @@ Consumers deduplicate by `eventId`. Developer receives authorized detailed
 events for all instances. Configurator receives only the permitted primary
 projection; the actor receives the state update without a toast for their own
 action.
+
+The Socket.IO namespace is `/configuration`. Authenticate with
+`auth: { "token": "<JWT>" }` and listen for `configuration.file-changed.v1`.
+The payload includes `schemaVersion`, `eventId`, `mutationId`, `instanceId`,
+`actorUserId`, `occurredAt`, `operation`, paths and content hashes. The
+Configurator projection omits events outside the configured primary subtree
+and sends paths relative to that subtree. Clients deduplicate by `eventId` and
+suppress their own toast when `actorUserId` matches the current user.
 
 ## Migration
 

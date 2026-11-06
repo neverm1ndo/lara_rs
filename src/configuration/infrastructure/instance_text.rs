@@ -116,6 +116,10 @@ impl LocalInstanceConfigurationTextService {
         payload: FileMutationPayload,
         backup: BackupRequirement,
     ) -> Result<InstanceConfigurationMutation, InstanceConfigurationError> {
+        let request = match context.mutation_id() {
+            Some(id) => request.with_mutation_id(id),
+            None => request,
+        };
         let coordinator = FileMutationCoordinator::new(
             context.target().storage().clone(),
             Arc::clone(&self.before_mutation),

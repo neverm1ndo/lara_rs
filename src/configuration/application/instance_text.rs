@@ -17,7 +17,9 @@ use crate::{
     },
     shared::{
         file_storage::{
-            mutation::{ContentHashAlgorithm, FileContentHash, FileRevision, MutationActor},
+            mutation::{
+                ContentHashAlgorithm, FileContentHash, FileRevision, MutationActor, MutationId,
+            },
             path::RelativeStoragePath,
         },
         user_role::UserRole,
@@ -64,6 +66,7 @@ pub struct InstanceConfigurationRequest {
     target: Arc<ConfigurationTarget>,
     access: ConfigurationAccess,
     actor: MutationActor,
+    mutation_id: Option<MutationId>,
 }
 
 impl InstanceConfigurationRequest {
@@ -101,6 +104,7 @@ impl InstanceConfigurationRequest {
             target,
             access,
             actor,
+            mutation_id: None,
         })
     }
 
@@ -114,6 +118,15 @@ impl InstanceConfigurationRequest {
 
     pub fn actor(&self) -> &MutationActor {
         &self.actor
+    }
+
+    pub fn with_mutation_id(mut self, mutation_id: MutationId) -> Self {
+        self.mutation_id = Some(mutation_id);
+        self
+    }
+
+    pub fn mutation_id(&self) -> Option<MutationId> {
+        self.mutation_id
     }
 
     pub fn validate_content(

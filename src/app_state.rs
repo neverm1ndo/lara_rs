@@ -14,7 +14,8 @@ use crate::{
     configuration::{
         application::{
             artifact_service::ConfigurationArtifactService, file_service::ConfigurationFileService,
-            instance_text::InstanceConfigurationTextService, target::ConfigurationTargetResolver,
+            instance_text::InstanceConfigurationTextService,
+            mutation_service::ConfigurationMutationService, target::ConfigurationTargetResolver,
         },
         presentation::{
             authorization::ConfigurationAuthorizationState,
@@ -45,6 +46,7 @@ pub struct AppState {
     configuration_target_resolver: Arc<dyn ConfigurationTargetResolver>,
     instance_text_service: Arc<dyn InstanceConfigurationTextService>,
     artifact_service: Arc<dyn ConfigurationArtifactService>,
+    configuration_mutation_service: Arc<ConfigurationMutationService>,
     configuration_file_encoding: &'static Encoding,
     configuration_file_upload_limit_bytes: u64,
     maps_file_service: Arc<dyn MapsFileService>,
@@ -67,6 +69,7 @@ impl AppState {
         configuration_target_resolver: Arc<dyn ConfigurationTargetResolver>,
         instance_text_service: Arc<dyn InstanceConfigurationTextService>,
         artifact_service: Arc<dyn ConfigurationArtifactService>,
+        configuration_mutation_service: Arc<ConfigurationMutationService>,
         configuration_file_encoding: &'static Encoding,
         configuration_file_upload_limit_bytes: u64,
         maps_file_service: impl MapsFileService + 'static,
@@ -86,6 +89,7 @@ impl AppState {
             configuration_target_resolver,
             instance_text_service,
             artifact_service,
+            configuration_mutation_service,
             configuration_file_encoding,
             configuration_file_upload_limit_bytes,
             maps_file_service: Arc::new(maps_file_service),
@@ -104,6 +108,9 @@ impl InstanceConfigurationState for AppState {
     }
     fn artifact_service(&self) -> Arc<dyn ConfigurationArtifactService> {
         Arc::clone(&self.artifact_service)
+    }
+    fn configuration_mutation_service(&self) -> Arc<ConfigurationMutationService> {
+        Arc::clone(&self.configuration_mutation_service)
     }
 }
 
