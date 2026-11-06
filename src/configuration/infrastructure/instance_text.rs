@@ -428,6 +428,7 @@ mod tests {
             std::fs::create_dir(&root).unwrap();
             std::fs::create_dir(root.join("primary")).unwrap();
             std::fs::create_dir(root.join("auxiliary")).unwrap();
+            std::fs::create_dir(root.join("auxiliary-two")).unwrap();
             std::fs::create_dir_all(root.join("primary/scriptfiles/config")).unwrap();
             Self(root)
         }
@@ -465,6 +466,7 @@ mod tests {
                 WINDOWS_1251,
             ),
             ("auxiliary", ConfigurationAccessScope::Auxiliary, UTF_8),
+            ("auxiliary-two", ConfigurationAccessScope::Auxiliary, UTF_8),
         ] {
             let storage = LocalFileStorage::open(
                 roots.path(id),
@@ -504,6 +506,38 @@ mod tests {
 
     fn path(value: &str) -> RelativeStoragePath {
         RelativeStoragePath::new(value).unwrap()
+    }
+
+    #[tokio::test]
+    async fn concurrent_auxiliary_writes_stay_within_their_own_roots() {
+        let roots = TestRoots::new();
+        let resolver = resolver(&roots).await;
+        let service = LocalInstanceConfigurationTextService::new(Arc::new(NoBackupProvider));
+        let first = context(&resolver, "auxiliary", UserRole::Developer).unwrap();
+        let second = context(&resolver, "auxiliary-two", UserRole::Developer).unwrap();
+        let (first_result, second_result) = tokio::join!(
+            service.create(
+                first.clone(),
+                path("server.cfg"),
+                first.validate_content(b"first".to_vec()).unwrap(),
+            ),
+            service.create(
+                second.clone(),
+                path("server.cfg"),
+                second.validate_content(b"second".to_vec()).unwrap(),
+            ),
+        );
+        assert_eq!(first_result.unwrap().instance_id, "auxiliary");
+        assert_eq!(second_result.unwrap().instance_id, "auxiliary-two");
+        assert_eq!(
+            std::fs::read(roots.path("auxiliary/server.cfg")).unwrap(),
+            b"first"
+        );
+        assert_eq!(
+            std::fs::read(roots.path("auxiliary-two/server.cfg")).unwrap(),
+            b"second"
+        );
+        assert!(!roots.path("primary/server.cfg").exists());
     }
 
     #[tokio::test]

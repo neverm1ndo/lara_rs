@@ -390,6 +390,13 @@ policy и проверяют кандидат тем же startup-валидат
 
 ### 9. Провести тестирование и пилот
 
+Автоматические тесты покрывают параллельную запись в изолированные roots,
+конфликт `ETag`, filesystem policy, маршруты и recovery intent/outbox.
+MongoDB repository имеет отдельный тест с `LARA_TEST_MONGODB_URI`.
+Read-only smoke-скрипт включён в Debian-пакет. Прогон на Linux-хосте, пилот
+двух auxiliary и rollback остаются критериями приёмки до перевода ADR в
+`Accepted`; порядок прогона описан в deployment README.
+
 - unit tests domain policy, resolver, authorization и revisions;
 - HTTP/OpenAPI tests canonical routes и отсутствия legacy routes;
 - filesystem integration tests symlink, traversal, races и atomic replace;

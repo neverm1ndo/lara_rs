@@ -12,6 +12,8 @@ pub use routes::router;
 
 pub mod instance_routes;
 pub mod instance_state;
+#[cfg(test)]
+mod instance_tests;
 pub mod realtime;
 #[cfg(test)]
 mod tests;

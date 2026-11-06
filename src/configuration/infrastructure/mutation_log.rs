@@ -179,3 +179,179 @@ fn duplicate_key(error: &MongoError) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::configuration::application::mutation_log::ConfigurationMutationEvent;
+
+    fn record(id: &str, key: &str, active_path: Option<&str>) -> ConfigurationMutationRecord {
+        ConfigurationMutationRecord {
+            id: id.into(),
+            actor_user_id: "operator-1".into(),
+            idempotency_key: key.into(),
+            fingerprint: format!("fingerprint-{key}"),
+            instance_id: "test".into(),
+            operation: "overwrite".into(),
+            source: Some("server.cfg".into()),
+            destination: None,
+            expected_hash: Some("sha256:before".into()),
+            desired_hash: Some("sha256:after".into()),
+            active_path: active_path.map(str::to_owned),
+            state: ConfigurationMutationState::Requested,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            event: None,
+            failure_code: None,
+            delivered_at: None,
+            delivery_lease_until: None,
+            delivery_lease_token: None,
+            review: None,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires an isolated MongoDB URI in LARA_TEST_MONGODB_URI"]
+    async fn mongo_indexes_recovery_and_outbox_leases() {
+        let uri = std::env::var("LARA_TEST_MONGODB_URI")
+            .expect("set LARA_TEST_MONGODB_URI to an isolated test MongoDB");
+        let client = mongodb::Client::with_uri_str(&uri).await.unwrap();
+        let database = client.database(&format!(
+            "lara_release_c_test_{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let log = MongoConfigurationMutationLog::new(database.clone());
+        log.ensure_indexes().await.unwrap();
+
+        let first = record("first", "key-1", Some("test:server.cfg"));
+        log.reserve(&first).await.unwrap();
+        assert_eq!(
+            log.by_key("operator-1", "key-1").await.unwrap().unwrap().id,
+            "first"
+        );
+        assert!(matches!(
+            log.reserve(&record("duplicate-key", "key-1", None)).await,
+            Err(ConfigurationMutationLogError::AlreadyExists)
+        ));
+        assert!(matches!(
+            log.reserve(&record("duplicate-path", "key-2", Some("test:server.cfg")))
+                .await,
+            Err(ConfigurationMutationLogError::AlreadyExists)
+        ));
+
+        let mut applying = first.clone();
+        applying.state = ConfigurationMutationState::Applying;
+        assert!(
+            log.transition(
+                "first",
+                ConfigurationMutationState::Requested,
+                applying.clone()
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            !log.transition(
+                "first",
+                ConfigurationMutationState::Requested,
+                applying.clone()
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(log.unresolved().await.unwrap().len(), 1);
+        applying.state = ConfigurationMutationState::ReconciliationRequired;
+        assert!(
+            log.transition(
+                "first",
+                ConfigurationMutationState::Applying,
+                applying.clone()
+            )
+            .await
+            .unwrap()
+        );
+        assert!(log.unresolved().await.unwrap().is_empty());
+        assert!(matches!(
+            log.reserve(&record("still-locked", "key-3", Some("test:server.cfg")))
+                .await,
+            Err(ConfigurationMutationLogError::AlreadyExists)
+        ));
+        applying.state = ConfigurationMutationState::Reviewed;
+        applying.active_path = None;
+        assert!(
+            log.transition(
+                "first",
+                ConfigurationMutationState::ReconciliationRequired,
+                applying
+            )
+            .await
+            .unwrap()
+        );
+        log.reserve(&record("new-intent", "key-4", Some("test:server.cfg")))
+            .await
+            .unwrap();
+
+        let mut succeeded = record("event", "key-5", None);
+        succeeded.state = ConfigurationMutationState::Succeeded;
+        succeeded.event = Some(ConfigurationMutationEvent {
+            event_id: "event-1".into(),
+            mutation_id: "event".into(),
+            instance_id: "test".into(),
+            actor_user_id: "operator-1".into(),
+            actor_session_id: None,
+            access_level: "developer".into(),
+            operation: "overwrite".into(),
+            source: Some("server.cfg".into()),
+            destination: None,
+            previous_hash: Some("sha256:before".into()),
+            current_hash: Some("sha256:after".into()),
+            backup_id: None,
+            occurred_at: "2026-01-01T00:00:00Z".into(),
+        });
+        log.reserve(&succeeded).await.unwrap();
+        assert_eq!(
+            log.claim_event("lease-1", "2026-01-01T00:00:00Z", "2026-01-02T00:00:00Z")
+                .await
+                .unwrap()
+                .unwrap()
+                .id,
+            "event"
+        );
+        assert!(
+            log.claim_event("lease-2", "2026-01-01T12:00:00Z", "2026-01-02T12:00:00Z")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            log.claim_event("lease-2", "2026-01-03T00:00:00Z", "2026-01-04T00:00:00Z")
+                .await
+                .unwrap()
+                .unwrap()
+                .delivery_lease_token
+                .as_deref(),
+            Some("lease-2")
+        );
+        log.acknowledge_event("event", "lease-1", "2026-01-03T00:00:00Z")
+            .await
+            .unwrap();
+        assert!(
+            log.by_id("event")
+                .await
+                .unwrap()
+                .unwrap()
+                .delivered_at
+                .is_none()
+        );
+        log.acknowledge_event("event", "lease-2", "2026-01-03T00:00:00Z")
+            .await
+            .unwrap();
+        assert!(
+            log.claim_event("lease-3", "2026-01-05T00:00:00Z", "2026-01-06T00:00:00Z")
+                .await
+                .unwrap()
+                .is_none()
+        );
+        database.drop().await.unwrap();
+    }
+}

@@ -375,3 +375,49 @@ sudo /usr/lib/lara-rs/smoke-release-b dev-dm
 5. Сохраните journal и вывод `systemctl show` для разбора причины отката.
 
 Не удаляйте каталог сервера и не меняйте его данные во время отката.
+
+## Release C: проверка configuration на пилотных инстансах
+
+После установки пакета и настройки отдельного auxiliary с capability
+`configuration` подготовьте JWT пользователя Developer в файле, доступном только
+администратору. Для read-only проверки нужны `curl` и `jq` на игровом хосте:
+
+```sh
+sudo /usr/lib/lara-rs/smoke-release-c test \
+  http://127.0.0.1:3000 /root/lara-developer.jwt
+
+# После подключения второго auxiliary:
+sudo /usr/lib/lara-rs/smoke-release-c test \
+  http://127.0.0.1:3000 /root/lara-developer.jwt test-two
+```
+
+Скрипт проверяет установленный пакет, `config validate`, `instance verify`,
+`doctor`, опубликованную OpenAPI, отсутствие старых `/configuration/...`,
+manifest и чтение дерева каждого указанного инстанса. Он не выполняет запись
+файлов, lifecycle-команды или изменение systemd. Запускайте сначала с одним
+инстансом, затем с двумя разными storage roots.
+
+Для пилота записи используйте только специально подготовленные файлы обоих
+auxiliary. Проверьте `POST /files` с multipart-полем `file`, `GET /files` и
+`ETag`, `PUT /files` с `If-Match`, отказ `412` для устаревшего `ETag`, а также
+отказ чтения файла первого инстанса через ID второго. Для бинарного артефакта
+подготовьте существующий неисполняемый файл из точного `artifact_paths`,
+сохраните его исходные байты, затем проверьте `HEAD /artifacts` и
+`PUT /artifacts` с `Content-Type: application/octet-stream`, `Idempotency-Key`
+и `If-Match`. Повтор с тем же idempotency key должен вернуть прежний результат
+без второй записи. Восстановление артефакта выполните отдельной операцией с
+новым ключом и актуальным `ETag`.
+
+Сверьте audit/realtime события с `instanceId` и полным путём. Для Developer
+проверьте оба инстанса; Configurator должен видеть только primary subtree, а
+Admin, Challenger, Mapper и Backuper не должны получать auxiliary
+configuration. После пилота сравните хеши игровых файлов и состояние
+`lara-game@...service` с зафиксированными до теста значениями. При проверке
+rollback пакета повторите `instance verify`, read-only smoke и проверку
+lifecycle Release B; само переключение версии выполняется отдельно по
+плану развёртывания.
+
+MongoDB recovery и outbox leases проверяются тестом
+`cargo test --locked mongo_indexes_recovery_and_outbox_leases -- --ignored --nocapture`
+при заданном `LARA_TEST_MONGODB_URI`. Тест создаёт базу со случайным именем и
+удаляет её после успешного завершения; используйте отдельный тестовый MongoDB.
