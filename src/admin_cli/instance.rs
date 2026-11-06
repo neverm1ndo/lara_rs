@@ -14,8 +14,9 @@ use super::config::{
 use crate::{
     cli::{
         InstanceAddArgs, InstanceCapabilityArg, InstanceCommand, InstanceConfigArgs,
-        InstanceEditArgs, InstanceEnvironmentArg, InstanceListArgs, InstanceRemoveArgs,
-        InstanceRenderSystemdArgs, InstanceVerifyArgs, OutputFormat,
+        InstanceConfigurationPolicyArgs, InstanceEditArgs, InstanceEnvironmentArg,
+        InstanceListArgs, InstanceRemoveArgs, InstanceRenderSystemdArgs, InstanceVerifyArgs,
+        OutputFormat,
     },
     server_instances::{
         application::registry::InstanceRegistry,
@@ -29,6 +30,7 @@ use crate::{
             systemd_runtime::{SystemdReloadError, reload_systemd_manager},
         },
     },
+    shared::config::model::EffectiveInstanceConfigurationConfig,
     shared::config::{AppConfig, ConfigError},
 };
 
@@ -75,6 +77,13 @@ fn list(args: InstanceListArgs) -> Result<(), InstanceCliError> {
 }
 
 fn add(args: InstanceAddArgs) -> Result<(), InstanceCliError> {
+    if args.configuration.is_specified()
+        && !args
+            .capabilities
+            .contains(&InstanceCapabilityArg::Configuration)
+    {
+        return Err(InstanceCliError::ConfigurationCapabilityRequired);
+    }
     let loaded = LoadedRegistry::read(&args.config)?;
     if loaded
         .registry
@@ -87,7 +96,9 @@ fn add(args: InstanceAddArgs) -> Result<(), InstanceCliError> {
 
     let mut document = loaded.document.clone();
     materialize_primary(&mut document, &loaded.registry)?;
-    instances_mut(&mut document)?.push(auxiliary_table(&args));
+    let mut table = auxiliary_table(&args);
+    apply_configuration_policy(&mut table, &args.configuration)?;
+    instances_mut(&mut document)?.push(table);
     let candidate = document.to_string();
     let registry = validate_candidate(&candidate, &loaded.environment)?;
     let instance = registry
@@ -113,6 +124,7 @@ fn edit(args: InstanceEditArgs) -> Result<(), InstanceCliError> {
         && args.capabilities.is_empty()
         && args.sort_order.is_none()
         && args.systemd_unit.is_none()
+        && !args.configuration.is_specified()
     {
         return Err(InstanceCliError::NoChanges);
     }
@@ -148,6 +160,7 @@ fn edit(args: InstanceEditArgs) -> Result<(), InstanceCliError> {
     if let Some(systemd_unit) = &args.systemd_unit {
         table["systemd_unit"] = value(systemd_unit);
     }
+    apply_configuration_policy(table, &args.configuration)?;
 
     let candidate = document.to_string();
     let registry = validate_candidate(&candidate, &loaded.environment)?;
@@ -447,6 +460,13 @@ pub(super) async fn collect_instance_verification(
     ));
     checks.extend(check_drop_in(&drop_in_file, &expected_drop_in));
     checks.push(check_environment_file(&environment_file, &args.group));
+    let app_config =
+        AppConfig::load_explicit_toml(&loaded.source, loaded.environment.iter().cloned())?;
+    checks.extend(configuration_policy_checks(
+        &app_config,
+        &descriptor,
+        &storage_root,
+    )?);
 
     match inspect_systemd_unit(&systemd_unit).await {
         Ok(effective) => checks.extend(check_effective_unit(
@@ -481,6 +501,150 @@ pub(super) async fn collect_instance_verification(
         warnings,
         checks,
     })
+}
+
+pub(super) fn configuration_policy_checks(
+    config: &AppConfig,
+    instance: &ServerInstance,
+    storage_root: &Path,
+) -> Result<Vec<VerificationCheck>, InstanceCliError> {
+    if !instance
+        .capabilities()
+        .contains(InstanceCapability::Configuration)
+    {
+        return Ok(Vec::new());
+    }
+    let policy = match config
+        .game_server
+        .instances
+        .iter()
+        .find(|registration| registration.id == instance.id().as_str())
+    {
+        Some(registration) => config.effective_configuration_policy(registration)?,
+        None if instance.kind() == InstanceKind::Primary => {
+            Some(config.implicit_primary_configuration_policy()?)
+        }
+        None => None,
+    }
+    .ok_or_else(|| InstanceCliError::NotFound(instance.id().to_string()))?;
+    Ok(check_effective_configuration_policy(storage_root, &policy))
+}
+
+fn check_effective_configuration_policy(
+    storage_root: &Path,
+    policy: &EffectiveInstanceConfigurationConfig,
+) -> Vec<VerificationCheck> {
+    let mut checks = vec![VerificationCheck::passed(
+        "configuration-policy",
+        "configuration policy passes startup validation",
+        Some(format!(
+            "encoding={}, ignored={}, artifacts={}, max_file_size_bytes={}",
+            policy.fallback_encoding,
+            policy.ignored_paths.len(),
+            policy.artifact_paths.len(),
+            policy.max_file_size_bytes
+        )),
+    )];
+    for path in &policy.artifact_paths {
+        checks.push(check_artifact_on_host(
+            storage_root,
+            path,
+            policy.max_file_size_bytes,
+        ));
+    }
+    checks
+}
+
+fn check_artifact_on_host(
+    storage_root: &Path,
+    relative: &Path,
+    max_size: u64,
+) -> VerificationCheck {
+    match fs::symlink_metadata(storage_root) {
+        Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
+        Ok(_) => {
+            return VerificationCheck::failed(
+                "configuration-artifact",
+                "artifact storage root is not a real directory",
+                Some(storage_root.display().to_string()),
+            );
+        }
+        Err(error) => {
+            return VerificationCheck::failed(
+                "configuration-artifact",
+                "artifact storage root cannot be inspected",
+                Some(format!("{}: {error}", storage_root.display())),
+            );
+        }
+    }
+    let mut current = storage_root.to_path_buf();
+    let mut final_metadata = None;
+    let final_path = storage_root.join(relative);
+    for component in relative.components() {
+        current.push(component);
+        let metadata = match fs::symlink_metadata(&current) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return VerificationCheck::failed(
+                    "configuration-artifact",
+                    "allowlisted artifact cannot be inspected",
+                    Some(format!("{}: {error}", current.display())),
+                );
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return VerificationCheck::failed(
+                "configuration-artifact",
+                "allowlisted artifact traverses a symbolic link",
+                Some(current.display().to_string()),
+            );
+        }
+        if current != final_path && !metadata.is_dir() {
+            return VerificationCheck::failed(
+                "configuration-artifact",
+                "allowlisted artifact parent is not a directory",
+                Some(current.display().to_string()),
+            );
+        }
+        if current == final_path {
+            final_metadata = Some(metadata);
+        }
+    }
+    let Some(metadata) = final_metadata else {
+        return VerificationCheck::failed(
+            "configuration-artifact",
+            "allowlisted artifact path is empty or invalid",
+            Some(relative.display().to_string()),
+        );
+    };
+    let path = final_path;
+    if !metadata.is_file() || metadata.len() > max_size {
+        return VerificationCheck::failed(
+            "configuration-artifact",
+            "allowlisted artifact must be a regular file within its upload limit",
+            Some(format!(
+                "{} (size={}, maximum={max_size})",
+                path.display(),
+                metadata.len()
+            )),
+        );
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 != 0 {
+            return VerificationCheck::failed(
+                "configuration-artifact",
+                "executable artifacts are blocked by the configuration API",
+                Some(path.display().to_string()),
+            );
+        }
+    }
+    VerificationCheck::passed(
+        "configuration-artifact",
+        "allowlisted artifact is an existing non-executable regular file",
+        Some(path.display().to_string()),
+    )
 }
 
 pub(super) fn human_verification_report(report: &InstanceVerificationReport) -> String {
@@ -641,7 +805,7 @@ fn check_environment_file(path: &Path, _group: &str) -> VerificationCheck {
 }
 
 #[cfg(unix)]
-fn local_group_id(name: &str) -> Option<u32> {
+pub(super) fn local_group_id(name: &str) -> Option<u32> {
     fs::read_to_string("/etc/group")
         .ok()?
         .lines()
@@ -1042,6 +1206,64 @@ fn auxiliary_table(args: &InstanceAddArgs) -> Table {
     table
 }
 
+fn apply_configuration_policy(
+    table: &mut Table,
+    args: &InstanceConfigurationPolicyArgs,
+) -> Result<(), InstanceCliError> {
+    if !args.is_specified() {
+        return Ok(());
+    }
+    let Some(policy) = table.get_mut("configuration").and_then(Item::as_table_mut) else {
+        return Err(InstanceCliError::ConfigurationCapabilityRequired);
+    };
+    if let Some(encoding) = &args.encoding {
+        policy["fallback_encoding"] = value(encoding);
+    }
+    if !args.binary_extensions.is_empty() {
+        policy["binary_extensions"] =
+            Item::Value(Value::Array(string_array(&args.binary_extensions)));
+    }
+    if !args.binary_file_names.is_empty() {
+        policy["binary_file_names"] =
+            Item::Value(Value::Array(string_array(&args.binary_file_names)));
+    }
+    if !args.ignored_paths.is_empty() || args.clear_ignored_paths {
+        policy["ignored_paths"] = Item::Value(Value::Array(path_array(&args.ignored_paths)));
+    }
+    if !args.artifact_paths.is_empty() || args.clear_artifact_paths {
+        policy["artifact_paths"] = Item::Value(Value::Array(path_array(&args.artifact_paths)));
+    }
+    if let Some(limit) = args.max_tree_depth {
+        policy["max_tree_depth"] =
+            value(i64::try_from(limit).map_err(|_| InstanceCliError::InvalidConfigurationLimit)?);
+    }
+    if let Some(limit) = args.max_tree_entries {
+        policy["max_tree_entries"] =
+            value(i64::try_from(limit).map_err(|_| InstanceCliError::InvalidConfigurationLimit)?);
+    }
+    if let Some(limit) = args.max_file_size_bytes {
+        policy["max_file_size_bytes"] =
+            value(i64::try_from(limit).map_err(|_| InstanceCliError::InvalidConfigurationLimit)?);
+    }
+    Ok(())
+}
+
+fn path_array(paths: &[PathBuf]) -> Array {
+    let mut result = Array::new();
+    for path in paths {
+        result.push(path_value(path));
+    }
+    result
+}
+
+fn string_array(values: &[String]) -> Array {
+    let mut result = Array::new();
+    for value in values {
+        result.push(value.as_str());
+    }
+    result
+}
+
 fn instance_table(
     instance: &ServerInstance,
     systemd_unit: Option<&str>,
@@ -1362,6 +1584,10 @@ pub enum InstanceCliError {
     NotSystemdManaged(String),
     #[error("instance edit requires at least one changed field")]
     NoChanges,
+    #[error("configuration policy options require the configuration capability")]
+    ConfigurationCapabilityRequired,
+    #[error("configuration limit is too large for TOML")]
+    InvalidConfigurationLimit,
     #[error("removing instance `{0}` requires --yes (or use --dry-run)")]
     ConfirmationRequired(String),
     #[error("the production overlay has no editable [[game_server.instances]] registry")]
@@ -1470,6 +1696,7 @@ LARA_MONGODB__URI=mongodb://localhost:27017
             ],
             sort_order: 20,
             systemd_unit: None,
+            configuration: InstanceConfigurationPolicyArgs::default(),
             dry_run,
             config,
         }
@@ -1496,6 +1723,86 @@ LARA_MONGODB__URI=mongodb://localhost:27017
                 InstanceRegistryError::OverlappingStorageRoots { .. }
             ))
         ));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn add_and_edit_configuration_policy_validate_before_writing() {
+        let (directory, config) = fixture("configuration-policy");
+        let mut args = add_args(config.clone(), false);
+        args.configuration.encoding = Some("utf-8".into());
+        args.configuration.artifact_paths = vec![PathBuf::from("gamemodes/test.dat")];
+        args.configuration.binary_file_names = vec!["test.dat".into()];
+        args.configuration.max_file_size_bytes = Some(1024);
+        add(args).unwrap();
+        let written = fs::read_to_string(&config.overlay_file).unwrap();
+        assert!(written.contains("fallback_encoding = \"utf-8\""));
+        assert!(written.contains("artifact_paths = [\"gamemodes/test.dat\"]"));
+        assert!(written.contains("binary_file_names = [\"test.dat\"]"));
+
+        let invalid = InstanceEditArgs {
+            id: "test".into(),
+            display_name: None,
+            environment: None,
+            storage_root: None,
+            capabilities: vec![],
+            sort_order: None,
+            systemd_unit: None,
+            configuration: InstanceConfigurationPolicyArgs {
+                artifact_paths: vec![PathBuf::from("plugins/unsafe.so")],
+                ..Default::default()
+            },
+            dry_run: false,
+            config: config.clone(),
+        };
+        assert!(matches!(edit(invalid), Err(InstanceCliError::Config(_))));
+        assert_eq!(fs::read_to_string(&config.overlay_file).unwrap(), written);
+
+        let clear = InstanceEditArgs {
+            id: "test".into(),
+            display_name: None,
+            environment: None,
+            storage_root: None,
+            capabilities: vec![],
+            sort_order: None,
+            systemd_unit: None,
+            configuration: InstanceConfigurationPolicyArgs {
+                clear_artifact_paths: true,
+                ..Default::default()
+            },
+            dry_run: false,
+            config,
+        };
+        edit(clear).unwrap();
+        assert!(
+            fs::read_to_string(directory.join("production.toml"))
+                .unwrap()
+                .contains("artifact_paths = []")
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn artifact_diagnostics_detect_missing_and_oversized_files() {
+        let directory = std::env::temp_dir().join(format!(
+            "lara-artifact-diagnostics-{}",
+            uuid::Uuid::new_v4()
+        ));
+        fs::create_dir_all(directory.join("gamemodes")).unwrap();
+        let relative = Path::new("gamemodes/test.amx");
+        assert_eq!(
+            check_artifact_on_host(&directory, relative, 4).status,
+            VerificationStatus::Failed
+        );
+        fs::write(directory.join(relative), b"12345").unwrap();
+        assert_eq!(
+            check_artifact_on_host(&directory, relative, 4).status,
+            VerificationStatus::Failed
+        );
+        assert_eq!(
+            check_artifact_on_host(&directory, relative, 5).status,
+            VerificationStatus::Passed
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 

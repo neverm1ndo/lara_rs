@@ -9,7 +9,7 @@ use super::{
     config::{ConfigCliError, print_result},
     instance::{
         InstanceCliError, VerificationStatus, collect_instance_verification,
-        human_verification_report,
+        configuration_policy_checks, human_verification_report,
     },
 };
 use crate::{
@@ -99,7 +99,29 @@ pub async fn execute(args: DoctorArgs) -> Result<(), DoctorError> {
             checks.push(check_group_access(
                 instance.id().as_str(),
                 configured.storage_root(),
+                &args.group,
             ));
+            if instance.kind() == InstanceKind::Primary {
+                match configuration_policy_checks(&config, &instance, configured.storage_root()) {
+                    Ok(policy_checks) => checks.extend(policy_checks.into_iter().map(|check| {
+                        DoctorCheck::new(
+                            format!("instance.{}.{}", instance.id(), check.id),
+                            match check.status {
+                                VerificationStatus::Passed => DoctorStatus::Passed,
+                                VerificationStatus::Warning => DoctorStatus::Warning,
+                                VerificationStatus::Failed => DoctorStatus::Failed,
+                            },
+                            check.summary,
+                            check.detail,
+                        )
+                    })),
+                    Err(error) => checks.push(DoctorCheck::failed(
+                        format!("instance.{}.configuration-policy", instance.id()),
+                        "primary configuration policy cannot be inspected",
+                        Some(error.to_string()),
+                    )),
+                }
+            }
         }
     }
 
@@ -301,19 +323,25 @@ fn check_directory(id: impl Into<String>, summary: impl Into<String>, path: &Pat
     }
 }
 
-fn check_group_access(instance_id: &str, path: &Path) -> DoctorCheck {
+fn check_group_access(instance_id: &str, path: &Path, group: &str) -> DoctorCheck {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let expected_gid = super::instance::local_group_id(group);
         match std::fs::metadata(path) {
-            Ok(metadata) if metadata.permissions().mode() & 0o070 == 0o070 => DoctorCheck::passed(
-                format!("instance.{instance_id}.configuration-access"),
-                "classic group bits allow configuration traversal and writes",
-                Some(path.display().to_string()),
-            ),
+            Ok(metadata)
+                if expected_gid == Some(metadata.gid())
+                    && metadata.permissions().mode() & 0o070 == 0o070 =>
+            {
+                DoctorCheck::passed(
+                    format!("instance.{instance_id}.configuration-access"),
+                    "storage root has the expected group and group read/write/traverse bits",
+                    Some(path.display().to_string()),
+                )
+            }
             Ok(_) => DoctorCheck::warning(
                 format!("instance.{instance_id}.configuration-access"),
-                "classic group bits do not prove Lara access; verify any POSIX ACL explicitly",
+                "group metadata does not prove Lara access; verify POSIX ACL or identity explicitly",
                 Some(path.display().to_string()),
             ),
             Err(error) => DoctorCheck::failed(
@@ -324,11 +352,14 @@ fn check_group_access(instance_id: &str, path: &Path) -> DoctorCheck {
         }
     }
     #[cfg(not(unix))]
-    DoctorCheck::warning(
-        format!("instance.{instance_id}.configuration-access"),
-        "Unix group and ACL checks are unavailable on this platform",
-        Some(path.display().to_string()),
-    )
+    {
+        let _ = group;
+        DoctorCheck::warning(
+            format!("instance.{instance_id}.configuration-access"),
+            "Unix group and ACL checks are unavailable on this platform",
+            Some(path.display().to_string()),
+        )
+    }
 }
 
 fn check_process_ownership(targets: &[(String, String, std::path::PathBuf)]) -> DoctorCheck {

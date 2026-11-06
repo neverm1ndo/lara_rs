@@ -376,6 +376,11 @@ filesystem границы и отсутствие symlink, но не измен�
 
 ### 8. Расширить CLI и диагностику
 
+Реализовано: `instance add/edit` принимают явные параметры configuration
+policy и проверяют кандидат тем же startup-валидатором, что и daemon.
+`instance verify` и `doctor` читают состояние allowlisted artifacts на хосте;
+создание файлов и смена прав остаются задачами оператора.
+
 - научить `instance add/edit` безопасно формировать configuration policy;
 - расширить `instance verify` и `doctor` read-only проверками;
 - обновить config examples и deployment documentation;

@@ -292,8 +292,9 @@ runtime `/openapi.json` их не содержит.
 `[game_server.instances.configuration]` непосредственно после соответствующей
 записи `[[game_server.instances]]`. Даже пустая таблица означает явное включение
 политики с безопасными defaults; `lara instance add` создаёт её автоматически.
-Если у существующего auxiliary уже есть эта capability, добавьте таблицу до
-обновления конфигурации: без неё startup validation завершится ошибкой.
+Для существующего auxiliary используйте `lara instance edit <id>
+--capability ... --capability configuration`, передав полный набор capabilities:
+CLI создаст таблицу вместе с изменением реестра.
 У primary таблица необязательна, поэтому старый `configuration.files` остаётся
 допустимым входом. Таблица для инстанса без capability отклоняется.
 
@@ -313,8 +314,19 @@ runtime `/openapi.json` их не содержит.
 запуск завершается ошибкой с ID инстанса. Текстовый сервис уже использует target,
 сильный ETag и `If-Match`. Отдельный сервис бинарных артефактов разрешает
 Developer заменить только существующий файл по точному пути из `artifact_paths`,
-не перекодирует байты и не перезапускает игровой сервер. HTTP-маршруты будут
-смонтированы на шаге 6 Release C.
+не перекодирует байты и не перезапускает игровой сервер. HTTP-маршруты
+доступны в instance-scoped API Release C.
+
+При добавлении или редактировании auxiliary можно задать политику без ручного
+редактирования TOML: `--configuration-encoding`, повторяемые
+`--configuration-artifact-path` и `--configuration-ignored-path`, а также
+`--configuration-binary-extension`, `--configuration-binary-file-name`,
+`--configuration-max-tree-depth`, `--configuration-max-tree-entries` и
+`--configuration-max-file-size-bytes`. Списки заменяются целиком;
+`--clear-configuration-artifact-paths` и `--clear-configuration-ignored-paths`
+очищают их. Параметры действуют только при capability `configuration`.
+`instance verify` и `doctor` проверяют существующие разрешённые артефакты
+только на чтение: отсутствие файла, symlink и превышение лимита дают ошибку.
 
 На Linux атомарная замена сохраняет mode и POSIX access ACL, а также требует
 сохранить владельца и группу исходного файла. Если пользователь `lara` не может

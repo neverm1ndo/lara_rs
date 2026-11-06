@@ -114,6 +114,8 @@ pub struct InstanceAddArgs {
     /// Override the default `lara-game@<id>.service` unit name.
     #[arg(long)]
     pub systemd_unit: Option<String>,
+    #[command(flatten)]
+    pub configuration: InstanceConfigurationPolicyArgs,
     /// Show the validated mutation without changing the overlay.
     #[arg(long)]
     pub dry_run: bool,
@@ -138,10 +140,67 @@ pub struct InstanceEditArgs {
     pub sort_order: Option<u32>,
     #[arg(long)]
     pub systemd_unit: Option<String>,
+    #[command(flatten)]
+    pub configuration: InstanceConfigurationPolicyArgs,
     #[arg(long)]
     pub dry_run: bool,
     #[command(flatten)]
     pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, Default, PartialEq, Eq)]
+pub struct InstanceConfigurationPolicyArgs {
+    /// Override the text encoding for this instance (for example windows-1251).
+    #[arg(long = "configuration-encoding")]
+    pub encoding: Option<String>,
+    /// Replace the list of extensions classified as binary. May be repeated.
+    #[arg(long = "configuration-binary-extension")]
+    pub binary_extensions: Vec<String>,
+    /// Replace the list of exact names classified as binary. May be repeated.
+    #[arg(long = "configuration-binary-file-name")]
+    pub binary_file_names: Vec<String>,
+    /// Replace the list of ignored relative paths. May be repeated.
+    #[arg(
+        long = "configuration-ignored-path",
+        conflicts_with = "clear_ignored_paths"
+    )]
+    pub ignored_paths: Vec<PathBuf>,
+    /// Replace the list of ignored paths with an empty list.
+    #[arg(long = "clear-configuration-ignored-paths")]
+    pub clear_ignored_paths: bool,
+    /// Replace the exact artifact allowlist. May be repeated.
+    #[arg(
+        long = "configuration-artifact-path",
+        conflicts_with = "clear_artifact_paths"
+    )]
+    pub artifact_paths: Vec<PathBuf>,
+    /// Clear the artifact allowlist.
+    #[arg(long = "clear-configuration-artifact-paths")]
+    pub clear_artifact_paths: bool,
+    /// Override the maximum tree depth, bounded by the global storage limit.
+    #[arg(long = "configuration-max-tree-depth")]
+    pub max_tree_depth: Option<usize>,
+    /// Override the maximum number of tree entries, bounded by the global storage limit.
+    #[arg(long = "configuration-max-tree-entries")]
+    pub max_tree_entries: Option<usize>,
+    /// Override the maximum file size, bounded by the global storage limit.
+    #[arg(long = "configuration-max-file-size-bytes")]
+    pub max_file_size_bytes: Option<u64>,
+}
+
+impl InstanceConfigurationPolicyArgs {
+    pub fn is_specified(&self) -> bool {
+        self.encoding.is_some()
+            || !self.binary_extensions.is_empty()
+            || !self.binary_file_names.is_empty()
+            || !self.ignored_paths.is_empty()
+            || self.clear_ignored_paths
+            || !self.artifact_paths.is_empty()
+            || self.clear_artifact_paths
+            || self.max_tree_depth.is_some()
+            || self.max_tree_entries.is_some()
+            || self.max_file_size_bytes.is_some()
+    }
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
@@ -513,6 +572,12 @@ mod tests {
             "lifecycle",
             "--capability",
             "configuration",
+            "--configuration-encoding",
+            "utf-8",
+            "--configuration-artifact-path",
+            "gamemodes/test.amx",
+            "--configuration-binary-extension",
+            "amx",
             "--dry-run",
         ])
         .unwrap();
@@ -533,6 +598,12 @@ mod tests {
             ]
         );
         assert!(args.dry_run);
+        assert_eq!(args.configuration.encoding.as_deref(), Some("utf-8"));
+        assert_eq!(
+            args.configuration.artifact_paths,
+            [PathBuf::from("gamemodes/test.amx")]
+        );
+        assert_eq!(args.configuration.binary_extensions, ["amx"]);
     }
 
     #[test]

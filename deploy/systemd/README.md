@@ -192,6 +192,8 @@ sudo lara instance add dev-dm \
   --capability lifecycle \
   --capability configuration \
   --capability incidents \
+  --configuration-encoding windows-1251 \
+  --configuration-artifact-path gamemodes/test.amx \
   --sort-order 20 \
   --dry-run
 
@@ -204,6 +206,8 @@ sudo lara instance add dev-dm \
   --capability lifecycle \
   --capability configuration \
   --capability incidents \
+  --configuration-encoding windows-1251 \
+  --configuration-artifact-path gamemodes/test.amx \
   --sort-order 20
 
 sudo lara instance list
@@ -218,10 +222,29 @@ timestamped backup и устанавливается atomic rename.
 
 Для auxiliary с `--capability configuration` CLI добавляет пустую таблицу
 `[game_server.instances.configuration]`: поля наследуются из общих defaults,
-а список разрешённых для загрузки бинарных артефактов остаётся пустым. Для
-уже зарегистрированного auxiliary с этой capability добавьте таблицу в
-production TOML перед следующим запуском Lara; иначе startup validation
-отклонит конфигурацию.
+а список разрешённых для загрузки бинарных артефактов остаётся пустым, если
+`--configuration-artifact-path` не указан. Этот параметр можно повторять для
+нескольких точных относительных путей. `instance edit` заменяет весь список
+при передаче хотя бы одного пути; `--clear-configuration-artifact-paths`
+сбрасывает его. Аналогично работают `--configuration-ignored-path` и
+`--clear-configuration-ignored-paths`. Доступны также
+`--configuration-encoding`, `--configuration-max-tree-depth`,
+`--configuration-max-tree-entries` и `--configuration-max-file-size-bytes`.
+Если формат ресурса отсутствует в унаследованной бинарной классификации,
+`--configuration-binary-extension` или `--configuration-binary-file-name`
+задают полный новый список соответствующего поля. Например, для одного
+нестандартного имени удобнее указать точное имя, чтобы не переводить все файлы
+этого расширения в binary-категорию.
+Эти параметры требуют capability `configuration`; CLI проверяет все значения
+тем же валидатором, что и запуск Lara. Для существующего auxiliary capability
+и её политику можно добавить одной командой `instance edit`.
+
+`instance verify` проверяет существование, тип, размер и отсутствие symlink
+для каждого разрешённого artifact; `doctor` включает те же проверки для
+auxiliary и отдельно проверяет primary. Это только чтение: команды не создают
+файлы, не меняют права и не перезапускают процессы. Проверка прав через
+групповые биты не доказывает доступ с учётом ACL; его нужно подтвердить в
+Linux smoke-test от имени пользователя `lara`.
 
 После регистрации drop-in можно сначала проверить, а затем установить отдельной
 командой:
