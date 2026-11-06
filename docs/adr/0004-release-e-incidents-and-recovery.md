@@ -104,11 +104,10 @@ capability manifest служит навигации.
    переходы operational/review states, нормализованные причины, правило
    корреляции с `LifecycleOperation`, HTTP DTO, cursor, коды ошибок и события
    Socket.IO. Проверить источники данных существующего `systemd_observer` и
-   `lifecycle_reconciliation_worker`. Сейчас manifest уже объявляет `read` и
-   `acknowledge` для `lara.incidents.v1`; до появления работающих endpoint эти
-   effective actions нужно скрыть либо включать синхронно с API. Результат:
-   согласованный контракт и таблица сценариев `planned stop`, `planned
-   restart`, `crash`, `automatic restart`, `external action`, `unknown`.
+   `lifecycle_reconciliation_worker`. Проект контракта и таблица сценариев
+   записаны в [документе Release E](../api/release-e-incidents.md). До появления
+   работающего API effective `lara.incidents.v1` и `incidentTracking` скрыты
+   из manifest; включать их нужно синхронно с API.
 
 2. **Доменная модель.** Добавить `Incident` и типизированное evidence в
    `server_instances/domain`, правила открытия, восстановления, разрешения

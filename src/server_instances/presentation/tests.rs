@@ -247,6 +247,11 @@ async fn developer_receives_all_instances_without_internal_runtime_configuration
         body["instances"][1]["features"]["lara.lifecycle.v1"]["permissions"],
         serde_json::json!(["read", "start", "stop", "restart"])
     );
+    assert!(body["instances"][1]["features"]["lara.incidents.v1"].is_null());
+    assert_eq!(
+        body["instances"][1]["observability"]["incidentTracking"],
+        false
+    );
     for forbidden in ["systemdUnit", "storageRoot", "udsPath"] {
         assert!(!body.to_string().contains(forbidden), "exposed {forbidden}");
     }

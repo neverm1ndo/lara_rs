@@ -185,7 +185,9 @@ fn project_instance(
         observability: ManifestObservability {
             process_monitoring: instance.management() == InstanceManagement::Systemd,
             readiness: observability.readiness(),
-            incident_tracking: observability.incident_tracking(),
+            // The registry flag is rollout intent. No incident journal is
+            // mounted yet, so the effective manifest must not advertise it.
+            incident_tracking: false,
         },
     }
 }
@@ -227,9 +229,8 @@ fn permissions_for(
         InstanceCapability::Backups if developer || subject.has_role(UserRole::Backuper) => {
             vec![FeaturePermission::Read, FeaturePermission::Restore]
         }
-        InstanceCapability::Incidents if developer => {
-            vec![FeaturePermission::Read, FeaturePermission::Acknowledge]
-        }
+        // Activate this capability alongside the Release E incident API.
+        InstanceCapability::Incidents => return None,
         _ => return None,
     };
 
@@ -354,7 +355,14 @@ mod tests {
 
         assert_eq!(manifest.instances.len(), 2);
         assert_eq!(manifest.instances[1].id.as_str(), "dev-dm");
-        assert_eq!(manifest.instances[1].features.len(), 4);
+        assert_eq!(manifest.instances[1].features.len(), 3);
+        assert!(!manifest.instances[1].observability.incident_tracking);
+        assert!(!manifest.instances[0].observability.incident_tracking);
+        assert!(
+            !manifest.instances[1]
+                .features
+                .contains_key(&FeatureId::Incidents)
+        );
         assert_eq!(
             manifest.instances[1].features[&FeatureId::Lifecycle].permissions,
             [
