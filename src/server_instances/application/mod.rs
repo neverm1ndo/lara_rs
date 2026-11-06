@@ -1,3 +1,4 @@
+pub mod incident_service;
 pub mod incidents;
 pub mod lifecycle_events;
 pub mod lifecycle_operations;

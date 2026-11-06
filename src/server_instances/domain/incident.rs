@@ -392,37 +392,40 @@ impl Incident {
             return Err(InvalidIncident::Evidence);
         }
         let mut facts = std::collections::HashSet::new();
+        let mut previous_evidence_at = snapshot.opened_at;
         for evidence in &snapshot.evidence {
             if !facts.insert(evidence.fact_id())
                 || evidence.unit_name() != opening.unit_name()
-                || evidence.occurred_at() < snapshot.opened_at
+                || evidence.occurred_at() < previous_evidence_at
                 || evidence.occurred_at() > snapshot.updated_at
             {
                 return Err(InvalidIncident::Evidence);
             }
+            previous_evidence_at = evidence.occurred_at();
         }
-        let timeline_valid = match snapshot.operational_state {
-            IncidentOperationalState::Open => {
-                snapshot.recovered_at.is_none() && snapshot.evidence.len() == 1
-            }
-            IncidentOperationalState::Recovering => {
-                snapshot.recovered_at.is_none()
-                    && snapshot.evidence.len() == 2
-                    && snapshot.evidence[1].process() == ProcessState::Activating
-            }
-            IncidentOperationalState::Resolved => {
+        let mut reconstructed = baseline.operational_state;
+        for evidence in snapshot.evidence.iter().skip(1) {
+            reconstructed = match (reconstructed, evidence.process()) {
+                (IncidentOperationalState::Open, ProcessState::Activating) => {
+                    IncidentOperationalState::Recovering
+                }
+                (
+                    IncidentOperationalState::Recovering,
+                    ProcessState::Failed | ProcessState::Inactive,
+                ) => IncidentOperationalState::Open,
+                (
+                    IncidentOperationalState::Open | IncidentOperationalState::Recovering,
+                    ProcessState::Active,
+                ) => IncidentOperationalState::Resolved,
+                _ => return Err(InvalidIncident::Transition),
+            };
+        }
+        let timeline_valid = reconstructed == snapshot.operational_state
+            && if reconstructed == IncidentOperationalState::Resolved {
                 snapshot.recovered_at == snapshot.evidence.last().map(IncidentEvidence::occurred_at)
-                    && if snapshot.kind == IncidentKind::UnexpectedRestart {
-                        snapshot.evidence.len() == 1
-                    } else {
-                        (2..=3).contains(&snapshot.evidence.len())
-                            && snapshot
-                                .evidence
-                                .last()
-                                .is_some_and(|e| e.process() == ProcessState::Active)
-                    }
-            }
-        };
+            } else {
+                snapshot.recovered_at.is_none()
+            };
         if !timeline_valid {
             return Err(InvalidIncident::Transition);
         }
@@ -575,6 +578,28 @@ impl Incident {
         Ok(IncidentChange::Applied)
     }
 
+    pub fn recovery_failed(
+        &mut self,
+        evidence: IncidentEvidence,
+        at: DateTime<Utc>,
+    ) -> Result<IncidentChange, InvalidIncident> {
+        if let Some(duplicate) = self.duplicate(&evidence)? {
+            return Ok(duplicate);
+        }
+        if self.operational_state != IncidentOperationalState::Recovering
+            || !matches!(
+                evidence.process,
+                ProcessState::Failed | ProcessState::Inactive
+            )
+        {
+            return Err(InvalidIncident::Transition);
+        }
+        self.append_evidence(evidence, at)?;
+        self.operational_state = IncidentOperationalState::Open;
+        self.last_change_actor = None;
+        Ok(IncidentChange::Applied)
+    }
+
     pub fn acknowledge(
         &mut self,
         reviewer_id: IncidentReviewerId,
@@ -639,7 +664,13 @@ impl Incident {
         evidence: IncidentEvidence,
         at: DateTime<Utc>,
     ) -> Result<(), InvalidIncident> {
-        if evidence.occurred_at < self.opened_at {
+        if evidence.occurred_at
+            < self
+                .evidence
+                .last()
+                .expect("incident has opening evidence")
+                .occurred_at
+        {
             return Err(InvalidIncident::Timeline);
         }
         if evidence.unit_name != self.evidence[0].unit_name {

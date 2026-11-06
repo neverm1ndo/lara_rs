@@ -82,12 +82,17 @@ use crate::{
     server_instances::{
         self,
         application::{
+            incident_service::{
+                IncidentObservation, IncidentObservationService, IncidentOperationLookup,
+            },
+            incidents::IncidentRepository,
             lifecycle_events::{LifecycleEventDelivery, LifecycleEventOutbox},
             lifecycle_reconciliation::LifecycleReconciler,
             lifecycle_service::LifecycleOperationService,
             registry::InstanceRegistry,
             runtime_state::{RuntimeStateReader, RuntimeStateWriter},
         },
+        domain::InstanceCapability,
         infrastructure::{
             config_registry::ConfiguredInstanceRegistry,
             incident_repository::MongoIncidentRepository,
@@ -201,6 +206,12 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
                     .as_str(),
                 descriptor.observability().readiness(),
             )
+            .with_incident_tracking(
+                descriptor.observability().incident_tracking()
+                    && descriptor
+                        .capabilities()
+                        .contains(InstanceCapability::Incidents),
+            )
         })
         .collect();
     let systemd_observer = (!observation_targets.is_empty())
@@ -289,7 +300,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         mongo_database.clone(),
     ));
     lifecycle_operations.ensure_indexes().await?;
-    let incidents = MongoIncidentRepository::new(mongo_database.clone());
+    let incidents = Arc::new(MongoIncidentRepository::new(mongo_database.clone()));
     incidents.ensure_indexes().await?;
     let recovered_events = lifecycle_operations.recover_missing_events().await?;
     if recovered_events > 0 {
@@ -300,6 +311,14 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         instance_registry.as_ref(),
     ));
     let registry_port: Arc<dyn InstanceRegistry> = instance_registry.clone();
+    let incident_repository: Arc<dyn IncidentRepository> = incidents;
+    let incident_operations: Arc<dyn IncidentOperationLookup> = lifecycle_operations.clone();
+    let incident_observation: Arc<dyn IncidentObservation> =
+        Arc::new(IncidentObservationService::new(
+            registry_port.clone(),
+            incident_repository,
+            incident_operations,
+        ));
     let lifecycle_operation_service = Arc::new(LifecycleOperationService::new(
         registry_port.clone(),
         lifecycle_operations,
@@ -498,8 +517,11 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         LIFECYCLE_EVENT_LEASE,
         LIFECYCLE_EVENT_BATCH_SIZE,
     )?;
-    let systemd_observer =
-        systemd_observer.map(|worker| worker.with_event_delivery(lifecycle_event_delivery));
+    let systemd_observer = systemd_observer.map(|worker| {
+        worker
+            .with_event_delivery(lifecycle_event_delivery)
+            .with_incident_observation(incident_observation)
+    });
     let get_user_service = GetUserService::new(user_profiles);
     let session_issuer = AuthenticatedSessionIssuer::new(
         sessions.clone(),

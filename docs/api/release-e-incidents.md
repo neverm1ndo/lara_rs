@@ -15,6 +15,16 @@
 | Manifest | Registry содержит `incidents` и `incident_tracking` | До готовности API effective `lara.incidents.v1` и `incidentTracking` скрыты; при подключении API включаются вместе |
 | Journald | Адаптера и checkpoint нет | Persistent journal, replay, обнаружение пробелов и дедупликация |
 
+После шага 4 D-Bus observer передаёт соседние нормализованные snapshots в
+application service. Первый snapshot и первый snapshot после разрыва D-Bus
+используются как baseline. При временной ошибке записи инцидента сервис
+повторяет переход с прежней границы наблюдения. Смена `InvocationID` или
+увеличение `NRestarts` между двумя `active` snapshots классифицируется как
+`unexpected_restart`; возможный короткий outage между ними пока не
+реконструируется. Подтверждённый плановый stop/restart сверяется с недавними
+сохранёнными lifecycle operations, включая уже завершённые; самостоятельный
+`failed` во время такой операции не подавляется.
+
 Текущий observer не хранит boot ID или journald cursor. Для доказуемого replay
 их нужно читать из journal, а не выводить из `InvocationID` или текущего PID.
 
@@ -78,6 +88,8 @@ boot ID и journald cursor для journal; для live D-Bus — сравнен�
 
 Operational state: `open -> recovering -> resolved`; при кратком отказе
 допустим `open -> resolved`, если промежуточное восстановление не наблюдалось.
+Неуспешная попытка восстановления переводит `recovering -> open` с новым
+свидетельством; последующие попытки остаются в рамках того же outage.
 Разрешённый инцидент не открывается повторно: новое независимое событие
 получает новый ID. Review state: `unreviewed -> acknowledged -> investigated`;
 автоматическое разрешение outage не меняет review state. Исправление ошибочной
