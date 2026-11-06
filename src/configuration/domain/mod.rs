@@ -15,3 +15,4 @@ pub use events::{
 pub use file_policy::{
     BinaryExtension, ConfigurationFileKind, ConfigurationFilePolicy, InvalidConfigurationFilePolicy,
 };
+pub mod artifact_policy;

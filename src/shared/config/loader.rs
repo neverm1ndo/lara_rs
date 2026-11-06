@@ -7,7 +7,11 @@ use std::{
 use ::config::{ConfigBuilder, Environment, File, FileFormat, Map, builder::DefaultState};
 
 use super::{AppConfig, ConfigError};
-use crate::shared::config::model::BackupCompression;
+use crate::shared::config::model::{
+    BackupCompression, EffectiveInstanceConfigurationConfig, FileStorageConfig,
+    InstanceCapabilityConfig, InstanceConfigurationConfig, InstanceKindConfig,
+    ServerInstanceConfig,
+};
 use crate::shared::file_storage::path::{RelativeStoragePath, StorageFileName};
 
 const EMBEDDED_DEFAULT_CONFIG: &str = include_str!("../../../config/default.toml");
@@ -57,6 +61,84 @@ const MAX_BACKUP_STALE_PREPARATION_SECONDS: u64 = 7 * 24 * 60 * 60;
 const MAX_BACKUP_DIFF_TIMEOUT_MS: u64 = 60_000;
 
 impl AppConfig {
+    /// Resolves and validates the configuration policy for one registration.
+    /// The result belongs to the configuration context's future target catalog;
+    /// it is intentionally absent from the server-instance domain model.
+    pub fn effective_configuration_policy(
+        &self,
+        instance: &ServerInstanceConfig,
+    ) -> Result<Option<EffectiveInstanceConfigurationConfig>, ConfigError> {
+        let has_capability = instance
+            .capabilities
+            .contains(&InstanceCapabilityConfig::Configuration);
+        if !has_capability {
+            return if instance.configuration.is_some() {
+                Err(ConfigError::UnexpectedInstanceConfiguration(
+                    instance.id.clone(),
+                ))
+            } else {
+                Ok(None)
+            };
+        }
+        if instance.kind == InstanceKindConfig::Auxiliary && instance.configuration.is_none() {
+            return Err(ConfigError::MissingInstanceConfiguration(
+                instance.id.clone(),
+            ));
+        }
+
+        self.resolve_configuration_policy(instance.configuration.as_ref(), &instance.id)
+            .map(Some)
+    }
+
+    /// Effective policy for the implicit primary used by legacy deployments.
+    pub fn implicit_primary_configuration_policy(
+        &self,
+    ) -> Result<EffectiveInstanceConfigurationConfig, ConfigError> {
+        self.resolve_configuration_policy(None, &self.game_server.primary_instance)
+    }
+
+    fn resolve_configuration_policy(
+        &self,
+        override_policy: Option<&InstanceConfigurationConfig>,
+        instance_id: &str,
+    ) -> Result<EffectiveInstanceConfigurationConfig, ConfigError> {
+        let defaults = &self.configuration.files;
+        let storage = &self.game_server.storage;
+        let policy = EffectiveInstanceConfigurationConfig {
+            fallback_encoding: override_policy
+                .and_then(|value| value.fallback_encoding.clone())
+                .unwrap_or_else(|| defaults.fallback_encoding.clone()),
+            binary_extensions: override_policy
+                .and_then(|value| value.binary_extensions.clone())
+                .unwrap_or_else(|| defaults.binary_extensions.clone()),
+            binary_file_names: override_policy
+                .and_then(|value| value.binary_file_names.clone())
+                .unwrap_or_else(|| defaults.binary_file_names.clone()),
+            ignored_paths: override_policy
+                .and_then(|value| value.ignored_paths.clone())
+                .unwrap_or_else(|| defaults.ignored_paths.clone()),
+            artifact_paths: override_policy
+                .map(|value| value.artifact_paths.clone())
+                .unwrap_or_default(),
+            max_tree_depth: override_policy
+                .and_then(|value| value.max_tree_depth)
+                .unwrap_or(storage.max_tree_depth),
+            max_tree_entries: override_policy
+                .and_then(|value| value.max_tree_entries)
+                .unwrap_or(storage.max_tree_entries),
+            max_file_size_bytes: override_policy
+                .and_then(|value| value.max_file_size_bytes)
+                .unwrap_or(storage.max_stream_size_bytes),
+        };
+        validate_effective_configuration_policy(&policy, storage).map_err(|reason| {
+            ConfigError::InvalidInstanceConfiguration {
+                instance: instance_id.to_owned(),
+                reason,
+            }
+        })?;
+        Ok(policy)
+    }
+
     /// Loads configuration in ascending priority order:
     /// built-in scalars, embedded default TOML, an explicitly selected TOML,
     /// deprecated environment names, and finally `LARA_*` variables.
@@ -263,6 +345,9 @@ impl AppConfig {
         validate_binary_file_names(&self.configuration.files.binary_file_names)?;
         validate_ignored_paths(&self.configuration.files.ignored_paths)?;
         validate_text_encoding(&self.configuration.files.fallback_encoding)?;
+        for instance in &self.game_server.instances {
+            self.effective_configuration_policy(instance)?;
+        }
         require_range(
             "maps.upload.max_files_per_request",
             self.maps.upload.max_files_per_request as u64,
@@ -281,10 +366,14 @@ impl AppConfig {
             self.maps.upload.max_file_size_bytes,
             MAX_MAP_BATCH_SIZE_BYTES,
         )?;
-        validate_backup_directory(
-            &self.game_server.storage.root,
-            &self.backups.storage.directory,
-        )?;
+        let primary_storage_root = self
+            .game_server
+            .instances
+            .iter()
+            .find(|instance| instance.id == self.game_server.primary_instance)
+            .and_then(|instance| instance.storage_root.as_deref())
+            .unwrap_or(&self.game_server.storage.root);
+        validate_backup_directory(primary_storage_root, &self.backups.storage.directory)?;
         validate_backup_compression(
             self.backups.storage.compression,
             self.backups.storage.compression_level,
@@ -682,6 +771,136 @@ fn validate_text_encoding(encoding: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
+fn validate_effective_configuration_policy(
+    policy: &EffectiveInstanceConfigurationConfig,
+    storage: &FileStorageConfig,
+) -> Result<(), String> {
+    validate_text_encoding(&policy.fallback_encoding).map_err(|error| error.to_string())?;
+    validate_binary_extensions(&policy.binary_extensions).map_err(|error| error.to_string())?;
+    validate_binary_file_names(&policy.binary_file_names).map_err(|error| error.to_string())?;
+    validate_ignored_paths(&policy.ignored_paths).map_err(|error| error.to_string())?;
+
+    for (name, value, maximum) in [
+        (
+            "max_tree_depth",
+            policy.max_tree_depth as u64,
+            storage.max_tree_depth as u64,
+        ),
+        (
+            "max_tree_entries",
+            policy.max_tree_entries as u64,
+            storage.max_tree_entries as u64,
+        ),
+        (
+            "max_file_size_bytes",
+            policy.max_file_size_bytes,
+            storage.max_stream_size_bytes,
+        ),
+    ] {
+        if value == 0 || value > maximum {
+            return Err(format!(
+                "{name} must be between 1 and the game_server.storage limit {maximum}"
+            ));
+        }
+    }
+
+    let ignored = policy
+        .ignored_paths
+        .iter()
+        .map(|path| RelativeStoragePath::try_from(path.as_path()))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("invalid ignored path: {error}"))?;
+    for (index, first) in ignored.iter().enumerate() {
+        for second in ignored.iter().skip(index + 1) {
+            if first.is_within_case_insensitive(second) || second.is_within_case_insensitive(first)
+            {
+                return Err(format!("ignored paths `{first}` and `{second}` overlap"));
+            }
+        }
+    }
+
+    let binary_names: HashSet<_> = policy
+        .binary_file_names
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect();
+    let binary_extensions: HashSet<_> = policy
+        .binary_extensions
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let mut unique_artifacts = HashSet::new();
+    for configured_path in &policy.artifact_paths {
+        let path = RelativeStoragePath::try_from(configured_path.as_path()).map_err(|error| {
+            format!(
+                "invalid artifact path `{}`: {error}",
+                configured_path.display()
+            )
+        })?;
+        if !unique_artifacts.insert(path.as_normalized_str().to_ascii_lowercase()) {
+            return Err(format!("duplicate artifact path `{path}`"));
+        }
+        if ignored
+            .iter()
+            .any(|ignored_path| path.is_within_case_insensitive(ignored_path))
+        {
+            return Err(format!(
+                "artifact path `{path}` is inside an ignored subtree"
+            ));
+        }
+        let file_name = path
+            .file_name()
+            .expect("validated artifact path has a name");
+        let normalized_name = file_name.to_ascii_lowercase();
+        let extension = normalized_name
+            .rsplit_once('.')
+            .map(|(_, extension)| extension);
+        if path.components().any(is_protected_artifact_component)
+            || normalized_name.contains(".so.")
+            || normalized_name.contains(".env.")
+            || normalized_name.contains(".service.")
+            || extension.is_some_and(is_protected_artifact_extension)
+        {
+            return Err(format!("artifact path `{path}` targets a protected file"));
+        }
+        if !binary_names.contains(&normalized_name)
+            && !extension.is_some_and(|extension| binary_extensions.contains(extension))
+        {
+            return Err(format!(
+                "artifact path `{path}` is not classified as binary by this instance policy"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_protected_artifact_component(component: &str) -> bool {
+    let normalized = component.to_ascii_lowercase();
+    normalized.starts_with('.')
+        || matches!(
+            normalized.as_str(),
+            "omp-server" | "samp03svr" | "systemd" | "secrets" | "private"
+        )
+}
+
+fn is_protected_artifact_extension(extension: &str) -> bool {
+    matches!(
+        extension,
+        "env"
+            | "so"
+            | "dll"
+            | "exe"
+            | "dylib"
+            | "bundle"
+            | "service"
+            | "socket"
+            | "key"
+            | "pem"
+            | "p12"
+            | "pfx"
+    )
+}
+
 fn parse_jwt_ttl_seconds(value: &str) -> Result<i64, ConfigError> {
     let seconds = value
         .parse::<i64>()
@@ -706,6 +925,9 @@ fn validate_mfa_encryption_key(value: &str) -> Result<(), ConfigError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::shared::config::model::{
+        InstanceEnvironmentConfig, InstanceManagementConfig, InstanceReadinessConfig,
+    };
 
     type ConfigMutation = Box<dyn Fn(&mut AppConfig)>;
 
@@ -788,6 +1010,213 @@ mod tests {
                 },
             },
         }
+    }
+
+    fn auxiliary_with_configuration() -> ServerInstanceConfig {
+        ServerInstanceConfig {
+            id: "test".into(),
+            display_name: "Test server".into(),
+            kind: InstanceKindConfig::Auxiliary,
+            environment: InstanceEnvironmentConfig::Testing,
+            sort_order: 20,
+            management: Some(InstanceManagementConfig::Systemd),
+            systemd_unit: Some("lara-game@test.service".into()),
+            storage_root: Some("/srv/openmp/test".into()),
+            capabilities: vec![
+                InstanceCapabilityConfig::Overview,
+                InstanceCapabilityConfig::Lifecycle,
+                InstanceCapabilityConfig::Configuration,
+            ],
+            configuration: Some(InstanceConfigurationConfig::default()),
+            readiness: Some(InstanceReadinessConfig::Process),
+            incident_tracking: true,
+            systemd_observation: None,
+        }
+    }
+
+    #[test]
+    fn resolves_primary_legacy_defaults_and_auxiliary_overrides() {
+        let mut config = valid_config();
+        let mut primary = auxiliary_with_configuration();
+        primary.id = "main".into();
+        primary.kind = InstanceKindConfig::Primary;
+        primary.capabilities.push(InstanceCapabilityConfig::Maps);
+        primary.capabilities.push(InstanceCapabilityConfig::Backups);
+        primary.configuration = None;
+        let primary_policy = config
+            .effective_configuration_policy(&primary)
+            .unwrap()
+            .unwrap();
+        assert_eq!(primary_policy.fallback_encoding, "windows-1251");
+        assert_eq!(primary_policy.ignored_paths, vec![PathBuf::from("logs")]);
+        assert!(primary_policy.artifact_paths.is_empty());
+
+        let mut auxiliary = auxiliary_with_configuration();
+        let overrides = auxiliary.configuration.as_mut().unwrap();
+        overrides.fallback_encoding = Some("utf-8".into());
+        overrides.ignored_paths = Some(vec!["cache".into()]);
+        overrides.artifact_paths = vec!["gamemodes/test.amx".into()];
+        overrides.max_file_size_bytes = Some(1024);
+        let policy = config
+            .effective_configuration_policy(&auxiliary)
+            .unwrap()
+            .unwrap();
+        assert_eq!(policy.fallback_encoding, "utf-8");
+        assert_eq!(policy.ignored_paths, vec![PathBuf::from("cache")]);
+        assert_eq!(
+            policy.artifact_paths,
+            vec![PathBuf::from("gamemodes/test.amx")]
+        );
+        assert_eq!(policy.max_file_size_bytes, 1024);
+        assert_eq!(
+            policy.binary_extensions,
+            config.configuration.files.binary_extensions
+        );
+        config.game_server.instances.push(auxiliary);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn backup_directory_checks_effective_primary_storage_root() {
+        let mut config = valid_config();
+        let mut primary = auxiliary_with_configuration();
+        primary.id = "main".into();
+        primary.kind = InstanceKindConfig::Primary;
+        primary.capabilities.push(InstanceCapabilityConfig::Maps);
+        primary.capabilities.push(InstanceCapabilityConfig::Backups);
+        primary.storage_root = Some("D:/different-primary".into());
+        config.game_server.instances = vec![primary];
+        config.backups.storage.directory = "D:/different-primary/backups".into();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::BackupDirectoryInsideGameServerRoot)
+        ));
+    }
+
+    #[test]
+    fn requires_auxiliary_policy_and_rejects_policy_without_capability() {
+        let mut config = valid_config();
+        let mut auxiliary = auxiliary_with_configuration();
+        auxiliary.configuration = None;
+        config.game_server.instances.push(auxiliary);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::MissingInstanceConfiguration(id)) if id == "test"
+        ));
+
+        let mut without_capability = auxiliary_with_configuration();
+        without_capability
+            .capabilities
+            .retain(|capability| *capability != InstanceCapabilityConfig::Configuration);
+        config.game_server.instances = vec![without_capability];
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::UnexpectedInstanceConfiguration(id)) if id == "test"
+        ));
+    }
+
+    #[test]
+    fn rejects_unsafe_artifacts_paths_and_out_of_range_limits() {
+        let cases = [
+            vec!["../test.amx"],
+            vec!["logs/test.amx"],
+            vec!["gamemodes/test.cfg"],
+            vec!["plugins/native.so"],
+            vec![".secrets/test.amx"],
+            vec!["gamemodes/test.amx", "GAMEMODES\\TEST.AMX"],
+        ];
+        for artifact_paths in cases {
+            let mut config = valid_config();
+            let mut auxiliary = auxiliary_with_configuration();
+            auxiliary.configuration.as_mut().unwrap().artifact_paths =
+                artifact_paths.into_iter().map(PathBuf::from).collect();
+            config.game_server.instances.push(auxiliary);
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidInstanceConfiguration { instance, .. }) if instance == "test"
+            ));
+        }
+
+        for size in [0, 10 * 1024 * 1024 + 1] {
+            let mut config = valid_config();
+            let mut auxiliary = auxiliary_with_configuration();
+            auxiliary
+                .configuration
+                .as_mut()
+                .unwrap()
+                .max_file_size_bytes = Some(size);
+            config.game_server.instances.push(auxiliary);
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidInstanceConfiguration { instance, .. }) if instance == "test"
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_versioned_native_library_even_if_binary_name_is_allowlisted() {
+        let mut config = valid_config();
+        let mut auxiliary = auxiliary_with_configuration();
+        let policy = auxiliary.configuration.as_mut().unwrap();
+        policy.binary_file_names = Some(vec!["native.so.1".into()]);
+        policy.artifact_paths = vec!["plugins/native.so.1".into()];
+        config.game_server.instances.push(auxiliary);
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidInstanceConfiguration { reason, .. }) if reason.contains("protected")
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_auxiliary_encoding_ignored_paths_and_tree_limits() {
+        let invalid_policies: [fn(&mut InstanceConfigurationConfig); 4] = [
+            |policy| policy.fallback_encoding = Some("unknown-encoding".into()),
+            |policy| policy.ignored_paths = Some(vec!["logs".into(), "logs/old".into()]),
+            |policy| policy.max_tree_depth = Some(0),
+            |policy| policy.max_tree_entries = Some(10_001),
+        ];
+
+        for make_invalid in invalid_policies {
+            let mut config = valid_config();
+            let mut auxiliary = auxiliary_with_configuration();
+            make_invalid(auxiliary.configuration.as_mut().unwrap());
+            config.game_server.instances.push(auxiliary);
+            assert!(matches!(
+                config.validate(),
+                Err(ConfigError::InvalidInstanceConfiguration { instance, .. }) if instance == "test"
+            ));
+        }
+    }
+
+    #[test]
+    fn production_overlay_deserializes_nested_auxiliary_policy() {
+        let overlay = include_str!("../../../deploy/systemd/production.toml.example");
+        let environment = [
+            ("LARA_JWT__SECRET".to_owned(), "a".repeat(32)),
+            ("LARA_MFA__ENCRYPTION_KEY".to_owned(), "11".repeat(32)),
+            (
+                "LARA_MYSQL__URL".to_owned(),
+                "mysql://localhost/lara".into(),
+            ),
+            (
+                "LARA_MONGODB__URI".to_owned(),
+                "mongodb://localhost:27017".into(),
+            ),
+        ];
+        let config = AppConfig::load_explicit_toml(overlay, environment).unwrap();
+        let auxiliary = config
+            .game_server
+            .instances
+            .iter()
+            .find(|instance| instance.id == "dev-dm")
+            .unwrap();
+        let policy = config
+            .effective_configuration_policy(auxiliary)
+            .unwrap()
+            .unwrap();
+        assert_eq!(policy.fallback_encoding, "windows-1251");
+        assert_eq!(policy.ignored_paths.len(), 2);
+        assert!(policy.artifact_paths.is_empty());
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub fn execute(command: ConfigCommand) -> Result<(), ConfigCliError> {
         ConfigCommand::Init(args) => init(args),
         ConfigCommand::Validate(args) => validate(args),
         ConfigCommand::Paths(args) => paths(args),
+        ConfigCommand::Mutation { .. } => Err(ConfigCliError::UseAsyncMutationReview),
     }
 }
 
@@ -294,6 +295,8 @@ struct ValidationResult {
 
 #[derive(Debug, Error)]
 pub enum ConfigCliError {
+    #[error("mutation review must use the async administration command")]
+    UseAsyncMutationReview,
     #[error("existing configuration requires --yes before replacement: {0:?}")]
     ConfirmationRequired(Vec<PathBuf>),
     #[error("invalid configuration path: {0}")]

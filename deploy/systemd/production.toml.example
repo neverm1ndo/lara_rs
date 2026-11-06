@@ -38,6 +38,17 @@ capabilities = ["overview", "lifecycle", "configuration", "incidents"]
 readiness = "process"
 incident_tracking = true
 
+# Explicit policy is required for a configuration-capable auxiliary. Omitted
+# values inherit the validated global configuration.files and storage limits.
+# No binary artifact is writable until its exact relative path is listed.
+# `lara instance add/edit --configuration-artifact-path gamemodes/test.amx`
+# writes this allowlist after validating the complete startup configuration.
+[game_server.instances.configuration]
+fallback_encoding = "windows-1251"
+ignored_paths = ["logs", "scriptfiles/cache"]
+artifact_paths = []
+max_file_size_bytes = 10485760
+
 [game_server.storage]
 root = "/srv/openmp/main"
 

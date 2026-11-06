@@ -103,6 +103,11 @@ pub struct ServerInstanceConfig {
     pub storage_root: Option<PathBuf>,
     #[serde(default)]
     pub capabilities: Vec<InstanceCapabilityConfig>,
+    /// Configuration bounded-context settings. Primary may continue to use
+    /// the legacy `configuration.files` defaults; auxiliary must declare this
+    /// table explicitly when it enables the Configuration capability.
+    #[serde(default)]
+    pub configuration: Option<InstanceConfigurationConfig>,
     #[serde(default)]
     pub readiness: Option<InstanceReadinessConfig>,
     #[serde(default = "default_incident_tracking")]
@@ -111,6 +116,34 @@ pub struct ServerInstanceConfig {
     /// `management = "external" | "systemd"`.
     #[serde(default)]
     pub systemd_observation: Option<bool>,
+}
+
+/// Per-instance overrides. Omitted fields inherit the validated primary
+/// defaults; an empty artifact list never grants binary write access.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstanceConfigurationConfig {
+    pub fallback_encoding: Option<String>,
+    pub binary_extensions: Option<Vec<String>>,
+    pub binary_file_names: Option<Vec<String>>,
+    pub ignored_paths: Option<Vec<PathBuf>>,
+    #[serde(default)]
+    pub artifact_paths: Vec<PathBuf>,
+    pub max_tree_depth: Option<usize>,
+    pub max_tree_entries: Option<usize>,
+    pub max_file_size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EffectiveInstanceConfigurationConfig {
+    pub fallback_encoding: String,
+    pub binary_extensions: Vec<String>,
+    pub binary_file_names: Vec<String>,
+    pub ignored_paths: Vec<PathBuf>,
+    pub artifact_paths: Vec<PathBuf>,
+    pub max_tree_depth: usize,
+    pub max_tree_entries: usize,
+    pub max_file_size_bytes: u64,
 }
 
 const fn default_incident_tracking() -> bool {

@@ -248,7 +248,7 @@ impl ConfigurationFileService for LocalConfigurationFileService {
     }
 }
 
-fn filter_tree(
+pub(crate) fn filter_tree(
     entries: Vec<StorageTreeEntry>,
     context: &ConfigurationRequestContext,
     policy: &ConfigurationFilePolicy,

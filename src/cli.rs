@@ -114,6 +114,8 @@ pub struct InstanceAddArgs {
     /// Override the default `lara-game@<id>.service` unit name.
     #[arg(long)]
     pub systemd_unit: Option<String>,
+    #[command(flatten)]
+    pub configuration: InstanceConfigurationPolicyArgs,
     /// Show the validated mutation without changing the overlay.
     #[arg(long)]
     pub dry_run: bool,
@@ -138,10 +140,67 @@ pub struct InstanceEditArgs {
     pub sort_order: Option<u32>,
     #[arg(long)]
     pub systemd_unit: Option<String>,
+    #[command(flatten)]
+    pub configuration: InstanceConfigurationPolicyArgs,
     #[arg(long)]
     pub dry_run: bool,
     #[command(flatten)]
     pub config: InstanceConfigArgs,
+}
+
+#[derive(Debug, Args, Default, PartialEq, Eq)]
+pub struct InstanceConfigurationPolicyArgs {
+    /// Override the text encoding for this instance (for example windows-1251).
+    #[arg(long = "configuration-encoding")]
+    pub encoding: Option<String>,
+    /// Replace the list of extensions classified as binary. May be repeated.
+    #[arg(long = "configuration-binary-extension")]
+    pub binary_extensions: Vec<String>,
+    /// Replace the list of exact names classified as binary. May be repeated.
+    #[arg(long = "configuration-binary-file-name")]
+    pub binary_file_names: Vec<String>,
+    /// Replace the list of ignored relative paths. May be repeated.
+    #[arg(
+        long = "configuration-ignored-path",
+        conflicts_with = "clear_ignored_paths"
+    )]
+    pub ignored_paths: Vec<PathBuf>,
+    /// Replace the list of ignored paths with an empty list.
+    #[arg(long = "clear-configuration-ignored-paths")]
+    pub clear_ignored_paths: bool,
+    /// Replace the exact artifact allowlist. May be repeated.
+    #[arg(
+        long = "configuration-artifact-path",
+        conflicts_with = "clear_artifact_paths"
+    )]
+    pub artifact_paths: Vec<PathBuf>,
+    /// Clear the artifact allowlist.
+    #[arg(long = "clear-configuration-artifact-paths")]
+    pub clear_artifact_paths: bool,
+    /// Override the maximum tree depth, bounded by the global storage limit.
+    #[arg(long = "configuration-max-tree-depth")]
+    pub max_tree_depth: Option<usize>,
+    /// Override the maximum number of tree entries, bounded by the global storage limit.
+    #[arg(long = "configuration-max-tree-entries")]
+    pub max_tree_entries: Option<usize>,
+    /// Override the maximum file size, bounded by the global storage limit.
+    #[arg(long = "configuration-max-file-size-bytes")]
+    pub max_file_size_bytes: Option<u64>,
+}
+
+impl InstanceConfigurationPolicyArgs {
+    pub fn is_specified(&self) -> bool {
+        self.encoding.is_some()
+            || !self.binary_extensions.is_empty()
+            || !self.binary_file_names.is_empty()
+            || !self.ignored_paths.is_empty()
+            || self.clear_ignored_paths
+            || !self.artifact_paths.is_empty()
+            || self.clear_artifact_paths
+            || self.max_tree_depth.is_some()
+            || self.max_tree_entries.is_some()
+            || self.max_file_size_bytes.is_some()
+    }
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
@@ -271,6 +330,65 @@ pub enum ConfigCommand {
     Validate(ConfigValidateArgs),
     /// Print canonical operational paths without reading secrets.
     Paths(ConfigPathsArgs),
+    /// Inspect and resolve an interrupted configuration mutation.
+    Mutation {
+        #[command(subcommand)]
+        command: MutationReviewCommand,
+    },
+}
+
+#[derive(Debug, Subcommand, PartialEq, Eq)]
+pub enum MutationReviewCommand {
+    /// Inspect the durable record and current file evidence without changing either.
+    Inspect(MutationInspectArgs),
+    /// Record an operator assessment and release the path lock without touching files.
+    Resolve(MutationResolveArgs),
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct MutationReviewConfigArgs {
+    #[arg(long, default_value = "/etc/lara/production.toml")]
+    pub overlay_file: PathBuf,
+    #[arg(long, default_value = "/etc/lara/lara.env")]
+    pub environment_file: PathBuf,
+    #[arg(long, value_enum, default_value_t)]
+    pub output: OutputFormat,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct MutationInspectArgs {
+    pub mutation_id: String,
+    #[command(flatten)]
+    pub config: MutationReviewConfigArgs,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum, PartialEq, Eq)]
+pub enum MutationAssessmentArg {
+    Applied,
+    NotApplied,
+    Indeterminate,
+}
+
+#[derive(Debug, Args, PartialEq, Eq)]
+pub struct MutationResolveArgs {
+    pub mutation_id: String,
+    /// Token shown by `lara config mutation inspect` for the same observation.
+    #[arg(long)]
+    pub evidence_token: String,
+    /// Human operator identifier retained in the audit record.
+    #[arg(long)]
+    pub reviewer: String,
+    /// Explanation of the operator's assessment.
+    #[arg(long)]
+    pub reason: String,
+    /// Assessment only; Lara does not infer or replay a file mutation from it.
+    #[arg(long, value_enum)]
+    pub assessment: MutationAssessmentArg,
+    /// Confirm release of the path lock after reviewing the current file state.
+    #[arg(long)]
+    pub yes: bool,
+    #[command(flatten)]
+    pub config: MutationReviewConfigArgs,
 }
 
 #[derive(Debug, Args, PartialEq, Eq)]
@@ -372,6 +490,59 @@ mod tests {
     }
 
     #[test]
+    fn parses_configuration_mutation_review_commands() {
+        let cli = Cli::try_parse_from([
+            "lara",
+            "config",
+            "mutation",
+            "inspect",
+            "mutation-1",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        let Command::Config {
+            command:
+                ConfigCommand::Mutation {
+                    command: MutationReviewCommand::Inspect(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected inspect command");
+        };
+        assert_eq!(args.mutation_id, "mutation-1");
+        assert_eq!(args.config.output, OutputFormat::Json);
+        let cli = Cli::try_parse_from([
+            "lara",
+            "config",
+            "mutation",
+            "resolve",
+            "mutation-1",
+            "--evidence-token",
+            "abc",
+            "--reviewer",
+            "alice",
+            "--reason",
+            "checked journal",
+            "--assessment",
+            "indeterminate",
+            "--yes",
+        ])
+        .unwrap();
+        let Command::Config {
+            command:
+                ConfigCommand::Mutation {
+                    command: MutationReviewCommand::Resolve(args),
+                },
+        } = cli.command
+        else {
+            panic!("expected resolve command");
+        };
+        assert_eq!(args.assessment, MutationAssessmentArg::Indeterminate);
+        assert!(args.yes);
+    }
+
+    #[test]
     fn publishes_package_version_and_only_implemented_commands() {
         let command = Cli::command();
 
@@ -401,6 +572,12 @@ mod tests {
             "lifecycle",
             "--capability",
             "configuration",
+            "--configuration-encoding",
+            "utf-8",
+            "--configuration-artifact-path",
+            "gamemodes/test.amx",
+            "--configuration-binary-extension",
+            "amx",
             "--dry-run",
         ])
         .unwrap();
@@ -421,6 +598,12 @@ mod tests {
             ]
         );
         assert!(args.dry_run);
+        assert_eq!(args.configuration.encoding.as_deref(), Some("utf-8"));
+        assert_eq!(
+            args.configuration.artifact_paths,
+            [PathBuf::from("gamemodes/test.amx")]
+        );
+        assert_eq!(args.configuration.binary_extensions, ["amx"]);
     }
 
     #[test]

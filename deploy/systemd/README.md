@@ -29,7 +29,7 @@ lara completions bash | sudo tee /usr/share/bash-completion/completions/lara >/d
 пишет скрипт в stdout и не читает production-конфигурацию.
 
 ```sh
-sudo apt install ./lara-rs_0.2.3-1_amd64.deb
+sudo apt install ./lara-rs_0.2.4-1_amd64.deb
 
 sudo lara config init --dry-run
 sudo lara config init
@@ -192,6 +192,8 @@ sudo lara instance add dev-dm \
   --capability lifecycle \
   --capability configuration \
   --capability incidents \
+  --configuration-encoding windows-1251 \
+  --configuration-artifact-path gamemodes/test.amx \
   --sort-order 20 \
   --dry-run
 
@@ -204,6 +206,8 @@ sudo lara instance add dev-dm \
   --capability lifecycle \
   --capability configuration \
   --capability incidents \
+  --configuration-encoding windows-1251 \
+  --configuration-artifact-path gamemodes/test.amx \
   --sort-order 20
 
 sudo lara instance list
@@ -215,6 +219,32 @@ sudo lara instance list
 root, его содержимое, drop-in или запущенный процесс. Каждая запись overlay
 проверяется полным startup-валидатором, выполняется под file lock, создаёт
 timestamped backup и устанавливается atomic rename.
+
+Для auxiliary с `--capability configuration` CLI добавляет пустую таблицу
+`[game_server.instances.configuration]`: поля наследуются из общих defaults,
+а список разрешённых для загрузки бинарных артефактов остаётся пустым, если
+`--configuration-artifact-path` не указан. Этот параметр можно повторять для
+нескольких точных относительных путей. `instance edit` заменяет весь список
+при передаче хотя бы одного пути; `--clear-configuration-artifact-paths`
+сбрасывает его. Аналогично работают `--configuration-ignored-path` и
+`--clear-configuration-ignored-paths`. Доступны также
+`--configuration-encoding`, `--configuration-max-tree-depth`,
+`--configuration-max-tree-entries` и `--configuration-max-file-size-bytes`.
+Если формат ресурса отсутствует в унаследованной бинарной классификации,
+`--configuration-binary-extension` или `--configuration-binary-file-name`
+задают полный новый список соответствующего поля. Например, для одного
+нестандартного имени удобнее указать точное имя, чтобы не переводить все файлы
+этого расширения в binary-категорию.
+Эти параметры требуют capability `configuration`; CLI проверяет все значения
+тем же валидатором, что и запуск Lara. Для существующего auxiliary capability
+и её политику можно добавить одной командой `instance edit`.
+
+`instance verify` проверяет существование, тип, размер и отсутствие symlink
+для каждого разрешённого artifact; `doctor` включает те же проверки для
+auxiliary и отдельно проверяет primary. Это только чтение: команды не создают
+файлы, не меняют права и не перезапускают процессы. Проверка прав через
+групповые биты не доказывает доступ с учётом ACL; его нужно подтвердить в
+Linux smoke-test от имени пользователя `lara`.
 
 После регистрации drop-in можно сначала проверить, а затем установить отдельной
 командой:
@@ -291,6 +321,9 @@ storage_root = "/srv/openmp/dev-dm"
 capabilities = ["overview", "lifecycle", "configuration", "incidents"]
 readiness = "process"
 incident_tracking = true
+
+[game_server.instances.configuration]
+artifact_paths = []
 ```
 
 После изменения overlay перезапустите Lara и проверьте Developer manifest.
@@ -342,3 +375,49 @@ sudo /usr/lib/lara-rs/smoke-release-b dev-dm
 5. Сохраните journal и вывод `systemctl show` для разбора причины отката.
 
 Не удаляйте каталог сервера и не меняйте его данные во время отката.
+
+## Release C: проверка configuration на пилотных инстансах
+
+После установки пакета и настройки отдельного auxiliary с capability
+`configuration` подготовьте JWT пользователя Developer в файле, доступном только
+администратору. Для read-only проверки нужны `curl` и `jq` на игровом хосте:
+
+```sh
+sudo /usr/lib/lara-rs/smoke-release-c test \
+  http://127.0.0.1:3000 /root/lara-developer.jwt
+
+# После подключения второго auxiliary:
+sudo /usr/lib/lara-rs/smoke-release-c test \
+  http://127.0.0.1:3000 /root/lara-developer.jwt test-two
+```
+
+Скрипт проверяет установленный пакет, `config validate`, `instance verify`,
+`doctor`, опубликованную OpenAPI, отсутствие старых `/configuration/...`,
+manifest и чтение дерева каждого указанного инстанса. Он не выполняет запись
+файлов, lifecycle-команды или изменение systemd. Запускайте сначала с одним
+инстансом, затем с двумя разными storage roots.
+
+Для пилота записи используйте только специально подготовленные файлы обоих
+auxiliary. Проверьте `POST /files` с multipart-полем `file`, `GET /files` и
+`ETag`, `PUT /files` с `If-Match`, отказ `412` для устаревшего `ETag`, а также
+отказ чтения файла первого инстанса через ID второго. Для бинарного артефакта
+подготовьте существующий неисполняемый файл из точного `artifact_paths`,
+сохраните его исходные байты, затем проверьте `HEAD /artifacts` и
+`PUT /artifacts` с `Content-Type: application/octet-stream`, `Idempotency-Key`
+и `If-Match`. Повтор с тем же idempotency key должен вернуть прежний результат
+без второй записи. Восстановление артефакта выполните отдельной операцией с
+новым ключом и актуальным `ETag`.
+
+Сверьте audit/realtime события с `instanceId` и полным путём. Для Developer
+проверьте оба инстанса; Configurator должен видеть только primary subtree, а
+Admin, Challenger, Mapper и Backuper не должны получать auxiliary
+configuration. После пилота сравните хеши игровых файлов и состояние
+`lara-game@...service` с зафиксированными до теста значениями. При проверке
+rollback пакета повторите `instance verify`, read-only smoke и проверку
+lifecycle Release B; само переключение версии выполняется отдельно по
+плану развёртывания.
+
+MongoDB recovery и outbox leases проверяются тестом
+`cargo test --locked mongo_indexes_recovery_and_outbox_leases -- --ignored --nocapture`
+при заданном `LARA_TEST_MONGODB_URI`. Тест создаёт базу со случайным именем и
+удаляет её после успешного завершения; используйте отдельный тестовый MongoDB.

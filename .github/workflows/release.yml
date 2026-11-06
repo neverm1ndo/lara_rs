@@ -102,6 +102,7 @@ jobs:
           grep -Fx 'usr/share/lara-rs/examples/production.toml.example' /tmp/lara-package-files
           grep -Fx 'usr/lib/lara-rs/verify-pilot' /tmp/lara-package-files
           grep -Fx 'usr/lib/lara-rs/smoke-release-b' /tmp/lara-package-files
+          grep -Fx 'usr/lib/lara-rs/smoke-release-c' /tmp/lara-package-files
           grep -Fx 'usr/share/doc/lara-rs/changelog.Debian.gz' /tmp/lara-package-files
           if grep -Eq '^usr/share/doc/lara-rs/examples/' /tmp/lara-package-files; then
             echo "operational examples must not be installed below /usr/share/doc" >&2
@@ -125,6 +126,8 @@ jobs:
           test -x /usr/lib/lara-rs/verify-pilot
           test -x /usr/lib/lara-rs/smoke-release-b
           sh -n /usr/lib/lara-rs/smoke-release-b
+          test -x /usr/lib/lara-rs/smoke-release-c
+          sh -n /usr/lib/lara-rs/smoke-release-c
           getent passwd lara
           getent passwd lara-game
           test "$(getent passwd lara | cut -d: -f6)" = "/var/lib/lara"

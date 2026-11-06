@@ -50,6 +50,7 @@ impl FileMutationCoordinator {
         payload: FileMutationPayload,
         backup_requirement: BackupRequirement,
     ) -> Result<FileChanged, FileMutationCoordinatorError> {
+        let _mutation_guard = self.storage.lock_mutations().await;
         validate_payload(
             request.operation(),
             &payload,

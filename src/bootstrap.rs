@@ -58,10 +58,22 @@ use crate::{
         },
     },
     configuration::{
-        self,
+        application::{
+            artifact_service::ConfigurationArtifactService,
+            instance_text::InstanceConfigurationTextService,
+            mutation_log::ConfigurationMutationLog, mutation_service::ConfigurationMutationService,
+            target::ConfigurationTargetResolver,
+        },
         domain::{BinaryExtension, ConfigurationFilePolicy},
-        infrastructure::file_service::LocalConfigurationFileService,
+        infrastructure::{
+            artifact_service::LocalConfigurationArtifactService,
+            event_dispatcher::ConfigurationEventDispatcher,
+            file_service::LocalConfigurationFileService,
+            instance_text::LocalInstanceConfigurationTextService,
+            mutation_log::MongoConfigurationMutationLog,
+        },
     },
+    configuration_targets::ConfigurationTargetCatalog,
     maps::{
         self,
         domain::{MAPS_STORAGE_NAMESPACE, MapFilePolicy},
@@ -130,6 +142,11 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
             .lifecycle_event_dispatcher
             .run(shutdown_rx.clone()),
     );
+    let configuration_events = tokio::spawn(
+        application
+            .configuration_event_dispatcher
+            .run(shutdown_rx.clone()),
+    );
     let lifecycle_reconciliation = application
         .lifecycle_reconciliation
         .map(|worker| tokio::spawn(worker.run(shutdown_rx.clone())));
@@ -144,6 +161,7 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let _ = shutdown_tx.send(true);
     maintenance.await?;
     lifecycle_events.await?;
+    configuration_events.await?;
     if let Some(observer) = systemd_observer {
         observer.await?;
     }
@@ -160,6 +178,7 @@ struct BuiltApplication {
     systemd_observer: Option<SystemdObserverWorker>,
     lifecycle_reconciliation: Option<LifecycleReconciliationWorker>,
     lifecycle_event_dispatcher: LifecycleEventDispatcher,
+    configuration_event_dispatcher: ConfigurationEventDispatcher,
 }
 
 async fn build_application(config: AppConfig) -> Result<BuiltApplication, BootstrapError> {
@@ -190,6 +209,19 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         primary_instance = %instance_registry.primary().id(),
         "server instance registry loaded"
     );
+    let configuration_target_resolver: Arc<dyn ConfigurationTargetResolver> =
+        Arc::new(ConfigurationTargetCatalog::open(&config, instance_registry.clone()).await?);
+    let primary_configuration = match config
+        .game_server
+        .instances
+        .iter()
+        .find(|entry| entry.id == config.game_server.primary_instance)
+    {
+        Some(entry) => config
+            .effective_configuration_policy(entry)?
+            .expect("validated primary has configuration capability"),
+        None => config.implicit_primary_configuration_policy()?,
+    };
     let configurator_directory =
         RelativeStoragePath::try_from(config.configuration.files.configurator_directory.as_path())?;
     let maps_directory = RelativeStoragePath::try_from(config.maps.files.directory.as_path())?;
@@ -203,11 +235,15 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         config.maps.upload.max_file_size_bytes,
         config.maps.upload.max_total_size_bytes,
     )?;
-    let game_server_storage =
-        LocalFileStorage::open(&config.game_server.storage.root, storage_limits).await?;
+    let primary_id = instance_registry.primary().id().clone();
+    let primary_storage_root = instance_registry
+        .configured(&primary_id)
+        .expect("validated registry always contains its primary")
+        .storage_root();
+    let game_server_storage = LocalFileStorage::open(primary_storage_root, storage_limits).await?;
     let maps_storage = game_server_storage.scoped(&maps_directory).await?;
     let configuration_encoding = Encoding::for_label(
-        config.configuration.files.fallback_encoding.as_bytes(),
+        primary_configuration.fallback_encoding.as_bytes(),
     )
     .ok_or_else(|| {
         std::io::Error::new(
@@ -216,24 +252,18 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         )
     })?;
     let configuration_policy = ConfigurationFilePolicy::new(
-        config
-            .configuration
-            .files
+        primary_configuration
             .binary_extensions
             .iter()
             .cloned()
             .map(BinaryExtension::new)
             .collect::<Result<Vec<_>, _>>()?,
-        config
-            .configuration
-            .files
+        primary_configuration
             .binary_file_names
             .iter()
             .map(StorageFileName::new)
             .collect::<Result<Vec<_>, _>>()?,
-        config
-            .configuration
-            .files
+        primary_configuration
             .ignored_paths
             .iter()
             .map(|path| RelativeStoragePath::try_from(path.as_path()))
@@ -317,7 +347,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         Arc::clone(&mfa_clock),
     ));
 
-    let backup_repository = Arc::new(MongoBackupRepository::new(mongo_database));
+    let backup_repository = Arc::new(MongoBackupRepository::new(mongo_database.clone()));
     backup_repository.ensure_indexes().await?;
     let snapshot_store = Arc::new(
         LocalBackupSnapshotStore::initialize(
@@ -330,7 +360,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         config.backups.diff.enabled,
         config.backups.diff.max_input_size_bytes,
         Duration::from_millis(config.backups.diff.generation_timeout_ms),
-        &config.configuration.files.fallback_encoding,
+        &primary_configuration.fallback_encoding,
     )?);
     let clock = Arc::new(SystemBackupClock);
     let compression = match config.backups.storage.compression {
@@ -344,8 +374,8 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         clock.clone(),
         Arc::new(UuidBackupIdGenerator),
         FileContentClassifier::new(
-            config.configuration.files.binary_extensions.clone(),
-            config.configuration.files.binary_file_names.clone(),
+            primary_configuration.binary_extensions.clone(),
+            primary_configuration.binary_file_names.clone(),
         )?,
         BackupPreparationPolicy::new(
             Duration::from_secs(config.backups.retention.lifetime_seconds),
@@ -354,6 +384,35 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
             config.backups.storage.compression_threshold_bytes,
         )?,
     ));
+    let instance_text_service: Arc<dyn InstanceConfigurationTextService> = Arc::new(
+        LocalInstanceConfigurationTextService::new(backup_provider.clone()),
+    );
+    let artifact_service: Arc<dyn ConfigurationArtifactService> = Arc::new(
+        LocalConfigurationArtifactService::new(backup_provider.clone()),
+    );
+    let mutation_log = Arc::new(MongoConfigurationMutationLog::new(mongo_database));
+    mutation_log.ensure_indexes().await?;
+    let mutation_log_port: Arc<dyn ConfigurationMutationLog> = mutation_log;
+    let configuration_mutation_service = Arc::new(ConfigurationMutationService::new(
+        mutation_log_port.clone(),
+        instance_text_service.clone(),
+        artifact_service.clone(),
+    ));
+    let recovery = configuration_mutation_service
+        .reconcile_unresolved()
+        .await?;
+    if recovery.resumable > 0 {
+        info!(
+            resumable = recovery.resumable,
+            "configuration mutations can resume with their original keys"
+        );
+    }
+    if recovery.review_required > 0 {
+        tracing::warn!(
+            review_required = recovery.review_required,
+            "configuration mutations require review after restart"
+        );
+    }
     let configuration_file_service = LocalConfigurationFileService::new(
         game_server_storage.clone(),
         configuration_policy.clone(),
@@ -419,7 +478,15 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         authenticated_users.clone(),
         session_protection,
     ));
-    let (socket_io_layer, socket_delivery) = configure_socket_io(authenticator.clone());
+    let (socket_io_layer, socket_delivery, io) = configure_socket_io(authenticator.clone());
+    let configuration_delivery = crate::configuration::presentation::realtime::configure(
+        &io,
+        authenticator.clone(),
+        instance_registry.primary().id().to_string(),
+        configurator_directory.clone(),
+    );
+    let configuration_event_dispatcher =
+        ConfigurationEventDispatcher::new(mutation_log_port, configuration_delivery);
     let lifecycle_event_delivery: Arc<dyn LifecycleEventDelivery> = socket_delivery;
     let lifecycle_event_dispatcher = LifecycleEventDispatcher::new(
         lifecycle_event_outbox,
@@ -476,6 +543,10 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         lifecycle_operation_service,
         configurator_directory,
         configuration_file_service,
+        configuration_target_resolver,
+        instance_text_service,
+        artifact_service,
+        configuration_mutation_service,
         configuration_encoding,
         storage_limits.max_stream_size_bytes,
         maps_file_service,
@@ -487,11 +558,8 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
 
     let (router, openapi) = OpenApiRouter::<AppState>::with_openapi(openapi)
         .merge(server_instances::presentation::router::<AppState>())
+        .merge(crate::configuration::presentation::instance_routes::router::<AppState>())
         .nest("/auth", auth::presentation::mfa_router::<AppState>())
-        .nest(
-            "/configuration",
-            configuration::presentation::router::<AppState>(),
-        )
         .nest("/maps", maps::presentation::router::<AppState>())
         .nest("/backups", backups::presentation::router::<AppState>())
         .nest("/user", user::presentation::router::<AppState>())
@@ -506,12 +574,13 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         systemd_observer,
         lifecycle_reconciliation,
         lifecycle_event_dispatcher,
+        configuration_event_dispatcher,
     })
 }
 
 fn base_openapi_document() -> utoipa::openapi::OpenApi {
     auth::presentation::openapi_document()
-        .merge_from(configuration::presentation::openapi_document())
+        .merge_from(crate::configuration::presentation::openapi_document())
         .merge_from(maps::presentation::openapi_document())
         .merge_from(backups::presentation::openapi_document())
         .merge_from(server_instances::presentation::openapi_document())
@@ -528,6 +597,12 @@ async fn shutdown_signal() {
 mod tests {
     use std::sync::Arc;
 
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+    };
+    use serde_json::Value;
+    use tower::ServiceExt;
     use utoipa_axum::router::OpenApiRouter;
 
     use super::*;
@@ -541,12 +616,6 @@ mod tests {
         },
         backups::{
             application::lifecycle::BackupLifecycleService, presentation::state::BackupsState,
-        },
-        configuration::{
-            application::file_service::ConfigurationFileService,
-            presentation::{
-                authorization::ConfigurationAuthorizationState, state::ConfigurationState,
-            },
         },
         maps::{application::file_service::MapsFileService, presentation::state::MapsState},
         server_instances::{
@@ -589,26 +658,6 @@ mod tests {
         }
     }
 
-    impl ConfigurationAuthorizationState for DocumentationState {
-        fn configurator_directory(&self) -> &RelativeStoragePath {
-            panic!("documentation generation does not resolve configuration")
-        }
-    }
-
-    impl ConfigurationState for DocumentationState {
-        fn configuration_file_service(&self) -> Arc<dyn ConfigurationFileService> {
-            panic!("documentation generation does not resolve application services")
-        }
-
-        fn configuration_file_encoding(&self) -> &'static Encoding {
-            encoding_rs::WINDOWS_1251
-        }
-
-        fn configuration_file_upload_limit_bytes(&self) -> u64 {
-            10 * 1024 * 1024
-        }
-    }
-
     impl BackupsState for DocumentationState {
         fn backup_lifecycle_service(&self) -> Arc<BackupLifecycleService> {
             panic!("documentation generation does not resolve application services")
@@ -635,16 +684,36 @@ mod tests {
         }
     }
 
-    #[test]
-    fn global_openapi_document_contains_domain_routes() {
-        let document = OpenApiRouter::<DocumentationState>::with_openapi(base_openapi_document())
+    impl crate::configuration::presentation::instance_state::InstanceConfigurationState
+        for DocumentationState
+    {
+        fn configuration_target_resolver(&self) -> Arc<dyn ConfigurationTargetResolver> {
+            panic!("documentation only")
+        }
+        fn instance_text_service(&self) -> Arc<dyn InstanceConfigurationTextService> {
+            panic!("documentation only")
+        }
+        fn artifact_service(&self) -> Arc<dyn ConfigurationArtifactService> {
+            panic!("documentation only")
+        }
+        fn configuration_mutation_service(&self) -> Arc<ConfigurationMutationService> {
+            panic!("documentation only")
+        }
+    }
+
+    fn documented_routes() -> OpenApiRouter<DocumentationState> {
+        OpenApiRouter::<DocumentationState>::with_openapi(base_openapi_document())
             .merge(crate::server_instances::presentation::router())
+            .merge(crate::configuration::presentation::instance_routes::router())
             .nest("/auth", auth::presentation::mfa_router())
-            .nest("/configuration", configuration::presentation::router())
             .nest("/maps", maps::presentation::router())
             .nest("/backups", backups::presentation::router())
             .nest("/user", user::presentation::router())
-            .into_openapi();
+    }
+
+    #[test]
+    fn global_openapi_document_contains_domain_routes_without_legacy_configuration() {
+        let document = documented_routes().into_openapi();
         let specification = serde_json::to_value(document).unwrap();
 
         assert_eq!(specification["openapi"], "3.1.0");
@@ -654,8 +723,33 @@ mod tests {
         assert!(specification["paths"]["/auth/mfa"]["get"].is_object());
         assert!(specification["paths"]["/auth/mfa/totp"]["delete"].is_object());
         assert!(specification["paths"]["/maps/tree"]["get"].is_object());
-        assert!(specification["paths"]["/configuration/tree"]["get"].is_object());
-        assert!(specification["paths"]["/configuration/files"]["post"].is_object());
+        assert!(specification["paths"]["/configuration/tree"].is_null());
+        assert!(specification["paths"]["/configuration/files"].is_null());
+        assert!(specification["paths"]["/configuration/files/rename"].is_null());
+        assert!(
+            specification["paths"]["/server-instances/{instance_id}/configuration/tree"]["get"]
+                .is_object()
+        );
+        let base = "/server-instances/{instance_id}/configuration";
+        for (suffix, methods) in [
+            ("/files", &["get", "post", "put", "delete"][..]),
+            ("/files/rename", &["patch"][..]),
+            ("/artifacts", &["head", "put"][..]),
+        ] {
+            for method in methods {
+                assert!(specification["paths"][format!("{base}{suffix}")][method].is_object());
+            }
+        }
+        assert!(
+            specification["paths"][format!("{base}/files")]["post"]["responses"]["201"].is_object()
+        );
+        assert!(
+            specification["paths"][format!("{base}/files")]["put"]["responses"]["200"].is_object()
+        );
+        assert!(
+            specification["paths"][format!("{base}/artifacts")]["put"]["responses"]["200"]
+                .is_object()
+        );
         assert!(specification["paths"]["/maps/files"]["post"].is_object());
         assert!(specification["paths"]["/backups/list"]["get"].is_object());
         assert!(specification["paths"]["/backups/backup/{backup_id}"]["get"].is_object());
@@ -669,5 +763,170 @@ mod tests {
             specification["components"]["securitySchemes"]["bearerAuth"]["scheme"],
             "bearer"
         );
+    }
+
+    #[tokio::test]
+    async fn legacy_configuration_route_returns_not_found() {
+        let (router, _) = documented_routes()
+            .with_state(DocumentationState)
+            .split_for_parts();
+        for uri in [
+            "/configuration/tree",
+            "/configuration/files?path=server.cfg",
+            "/configuration/files/rename",
+        ] {
+            let response = router
+                .clone()
+                .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn instance_configuration_routes_require_a_session() {
+        let (router, _) = documented_routes()
+            .with_state(DocumentationState)
+            .split_for_parts();
+        for (method, uri) in [
+            ("GET", "/server-instances/test/configuration/tree"),
+            (
+                "GET",
+                "/server-instances/test/configuration/files?path=server.cfg",
+            ),
+            (
+                "POST",
+                "/server-instances/test/configuration/files?path=server.cfg",
+            ),
+            (
+                "HEAD",
+                "/server-instances/test/configuration/artifacts?path=mod.so",
+            ),
+            (
+                "PUT",
+                "/server-instances/test/configuration/artifacts?path=mod.so",
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+        }
+    }
+
+    fn assert_contract_references_exist(document: &Value, node: &Value) {
+        match node {
+            Value::Object(fields) => {
+                if let Some(reference) = fields.get("$ref").and_then(Value::as_str) {
+                    let pointer = reference.strip_prefix('#').expect("local reference");
+                    assert!(
+                        document.pointer(pointer).is_some(),
+                        "unresolved {reference}"
+                    );
+                }
+                for value in fields.values() {
+                    assert_contract_references_exist(document, value);
+                }
+            }
+            Value::Array(items) => {
+                for item in items {
+                    assert_contract_references_exist(document, item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn release_c_contract_freezes_scoped_paths_headers_and_errors() {
+        let contract: Value = serde_json::from_str(include_str!(
+            "../docs/api/release-c-configuration.openapi.json"
+        ))
+        .unwrap();
+        assert_eq!(contract["openapi"], "3.1.0");
+        assert_eq!(contract["security"][0]["bearerAuth"], serde_json::json!([]));
+        assert_contract_references_exist(&contract, &contract);
+
+        let paths = contract["paths"].as_object().unwrap();
+        assert_eq!(paths.len(), 4);
+        assert!(
+            paths
+                .keys()
+                .all(|path| path.starts_with("/server-instances/{instance_id}/configuration/"))
+        );
+        let tree = &contract["paths"]["/server-instances/{instance_id}/configuration/tree"];
+        let files = &contract["paths"]["/server-instances/{instance_id}/configuration/files"];
+        let rename =
+            &contract["paths"]["/server-instances/{instance_id}/configuration/files/rename"];
+        let artifacts =
+            &contract["paths"]["/server-instances/{instance_id}/configuration/artifacts"];
+        assert!(tree["get"].is_object());
+        for method in ["get", "post", "put", "delete"] {
+            assert!(files[method].is_object(), "missing files {method}");
+        }
+        assert!(rename["patch"].is_object());
+        assert!(artifacts["head"].is_object());
+        assert!(artifacts["put"].is_object());
+
+        for operation in [
+            &files["post"],
+            &files["put"],
+            &files["delete"],
+            &rename["patch"],
+            &artifacts["put"],
+        ] {
+            let parameters = operation["parameters"].as_array().unwrap();
+            assert!(
+                parameters
+                    .iter()
+                    .any(|parameter| parameter["$ref"] == "#/components/parameters/IdempotencyKey")
+            );
+            assert!(operation["responses"]["409"].is_object());
+        }
+        for operation in [
+            &files["put"],
+            &files["delete"],
+            &rename["patch"],
+            &artifacts["put"],
+        ] {
+            let parameters = operation["parameters"].as_array().unwrap();
+            assert!(
+                parameters
+                    .iter()
+                    .any(|parameter| parameter["$ref"] == "#/components/parameters/IfMatch")
+            );
+            assert!(operation["responses"]["412"].is_object());
+            assert!(operation["responses"]["428"].is_object());
+        }
+        assert_eq!(
+            files["get"]["responses"]["200"]["$ref"],
+            "#/components/responses/TextFile"
+        );
+        assert_eq!(
+            artifacts["head"]["responses"]["200"]["$ref"],
+            "#/components/responses/ArtifactMetadata"
+        );
+        assert_eq!(
+            artifacts["put"]["x-lara-roles"],
+            serde_json::json!(["Developer"])
+        );
+        assert_eq!(
+            artifacts["head"]["x-lara-roles"],
+            serde_json::json!(["Developer"])
+        );
+        assert!(contract["paths"]["/configuration/files"].is_null());
     }
 }

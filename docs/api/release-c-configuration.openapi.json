@@ -1,0 +1,312 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Lara Release C configuration contract",
+    "version": "1.0.0",
+    "description": "Release C contract for the instance-scoped configuration API. Mutations use a durable MongoDB intent and embedded outbox. Interrupted Applying records require operator reconciliation before retry."
+  },
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/server-instances/{instance_id}/configuration/tree": {
+      "parameters": [{ "$ref": "#/components/parameters/InstanceId" }],
+      "get": {
+        "operationId": "configurationTree",
+        "tags": ["Server configuration"],
+        "x-lara-roles": ["Developer", "Configurator"],
+        "responses": {
+          "200": { "$ref": "#/components/responses/Tree" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/server-instances/{instance_id}/configuration/files": {
+      "parameters": [{ "$ref": "#/components/parameters/InstanceId" }],
+      "get": {
+        "operationId": "readConfigurationText",
+        "tags": ["Server configuration"],
+        "x-lara-roles": ["Developer", "Configurator"],
+        "parameters": [{ "$ref": "#/components/parameters/FilePath" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/TextFile" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "415": { "$ref": "#/components/responses/BinaryFile" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "post": {
+        "operationId": "createConfigurationText",
+        "tags": ["Server configuration"],
+        "x-lara-roles": ["Developer", "Configurator"],
+        "parameters": [
+          { "$ref": "#/components/parameters/FilePath" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/TextUpload" },
+        "responses": {
+          "201": { "$ref": "#/components/responses/MutationCreated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "415": { "$ref": "#/components/responses/BinaryFile" },
+          "422": { "$ref": "#/components/responses/InvalidEncoding" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "put": {
+        "operationId": "overwriteConfigurationText",
+        "tags": ["Server configuration"],
+        "x-lara-roles": ["Developer", "Configurator"],
+        "parameters": [
+          { "$ref": "#/components/parameters/FilePath" },
+          { "$ref": "#/components/parameters/IfMatch" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/TextUpload" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/MutationUpdated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "412": { "$ref": "#/components/responses/PreconditionFailed" },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "415": { "$ref": "#/components/responses/BinaryFile" },
+          "422": { "$ref": "#/components/responses/InvalidEncoding" },
+          "428": { "$ref": "#/components/responses/PreconditionRequired" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteConfigurationFile",
+        "tags": ["Server configuration"],
+        "x-lara-roles": ["Developer", "Configurator"],
+        "parameters": [
+          { "$ref": "#/components/parameters/FilePath" },
+          { "$ref": "#/components/parameters/IfMatch" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/MutationDeleted" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "412": { "$ref": "#/components/responses/PreconditionFailed" },
+          "415": { "$ref": "#/components/responses/BinaryFile" },
+          "428": { "$ref": "#/components/responses/PreconditionRequired" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/server-instances/{instance_id}/configuration/files/rename": {
+      "parameters": [{ "$ref": "#/components/parameters/InstanceId" }],
+      "patch": {
+        "operationId": "renameConfigurationFile",
+        "tags": ["Server configuration"],
+        "x-lara-roles": ["Developer", "Configurator"],
+        "parameters": [
+          { "$ref": "#/components/parameters/IfMatch" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/Rename" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/MutationUpdated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "412": { "$ref": "#/components/responses/PreconditionFailed" },
+          "415": { "$ref": "#/components/responses/BinaryFile" },
+          "428": { "$ref": "#/components/responses/PreconditionRequired" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    },
+    "/server-instances/{instance_id}/configuration/artifacts": {
+      "parameters": [{ "$ref": "#/components/parameters/InstanceId" }],
+      "head": {
+        "operationId": "inspectConfigurationArtifact",
+        "tags": ["Server configuration"],
+        "x-lara-roles": ["Developer"],
+        "parameters": [{ "$ref": "#/components/parameters/FilePath" }],
+        "responses": {
+          "200": { "$ref": "#/components/responses/ArtifactMetadata" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "put": {
+        "operationId": "updateConfigurationArtifact",
+        "tags": ["Server configuration"],
+        "x-lara-roles": ["Developer"],
+        "parameters": [
+          { "$ref": "#/components/parameters/FilePath" },
+          { "$ref": "#/components/parameters/IfMatch" },
+          { "$ref": "#/components/parameters/IdempotencyKey" }
+        ],
+        "requestBody": { "$ref": "#/components/requestBodies/ArtifactUpload" },
+        "responses": {
+          "200": { "$ref": "#/components/responses/MutationUpdated" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "412": { "$ref": "#/components/responses/PreconditionFailed" },
+          "413": { "$ref": "#/components/responses/TooLarge" },
+          "428": { "$ref": "#/components/responses/PreconditionRequired" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": { "type": "http", "scheme": "bearer", "bearerFormat": "JWT" }
+    },
+    "parameters": {
+      "InstanceId": {
+        "name": "instance_id", "in": "path", "required": true,
+        "schema": { "type": "string", "minLength": 1 },
+        "description": "Stable ID from the authenticated instance manifest."
+      },
+      "FilePath": {
+        "name": "path", "in": "query", "required": true,
+        "schema": { "type": "string", "minLength": 1 },
+        "description": "Slash-separated relative path within the caller's configuration capability."
+      },
+      "IfMatch": {
+        "name": "If-Match", "in": "header", "required": true,
+        "schema": { "type": "string", "pattern": "^\"[^\"]+\"$" },
+        "description": "Exactly one strong ETag from GET /files or HEAD /artifacts; weak tags and * are invalid."
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key", "in": "header", "required": true,
+        "schema": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "description": "1–128 visible ASCII characters; scoped to the authenticated actor."
+      }
+    },
+    "requestBodies": {
+      "TextUpload": {
+        "required": true,
+        "content": { "multipart/form-data": {
+          "schema": { "type": "object", "required": ["file"], "additionalProperties": false,
+            "properties": { "file": { "type": "string", "format": "binary" } } }
+        } }
+      },
+      "Rename": {
+        "required": true,
+        "content": { "application/json": {
+          "schema": { "$ref": "#/components/schemas/RenameFileRequest" }
+        } }
+      },
+      "ArtifactUpload": {
+        "required": true,
+        "content": { "application/octet-stream": {
+          "schema": { "type": "string", "format": "binary" }
+        } }
+      }
+    },
+    "schemas": {
+      "Tree": {
+        "type": "object", "required": ["entries"], "additionalProperties": false,
+        "properties": { "entries": { "type": "array", "items": { "$ref": "#/components/schemas/TreeEntry" } } }
+      },
+      "TreeEntry": {
+        "type": "object", "required": ["path", "name", "kind", "children"],
+        "properties": {
+          "path": { "type": "string" }, "name": { "type": "string" },
+          "kind": { "type": "string", "enum": ["directory", "text", "binary"] },
+          "size": { "type": ["integer", "null"], "minimum": 0 },
+          "modifiedAt": { "type": ["string", "null"], "format": "date-time" },
+          "children": { "type": "array", "items": { "$ref": "#/components/schemas/TreeEntry" } }
+        }
+      },
+      "RenameFileRequest": {
+        "type": "object", "required": ["source", "destination"], "additionalProperties": false,
+        "properties": { "source": { "type": "string" }, "destination": { "type": "string" } }
+      },
+      "MutationSuccess": {
+        "type": "object", "required": ["mutationId", "instanceId", "status", "eventId", "eventType", "occurredAt"],
+        "additionalProperties": false,
+        "properties": {
+          "mutationId": { "type": "string", "format": "uuid" },
+          "instanceId": { "type": "string" },
+          "status": { "const": "succeeded" },
+          "eventId": { "type": "string" },
+          "eventType": { "const": "configuration.file-changed.v1" },
+          "occurredAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Error": {
+        "type": "object", "required": ["code"],
+        "properties": { "code": { "type": "string" }, "mutationId": { "type": "string", "format": "uuid" } }
+      }
+    },
+    "responses": {
+      "Tree": {
+        "description": "Tree scoped to this instance and the caller's role.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Tree" } } }
+      },
+      "TextFile": {
+        "description": "Raw text bytes with Content-Type charset from the target's configured encoding.",
+        "headers": { "ETag": { "required": true, "schema": { "type": "string" } } },
+        "content": { "text/plain": { "schema": { "type": "string", "format": "binary" } } }
+      },
+      "ArtifactMetadata": {
+        "description": "Existing allowlisted artifact metadata; no response body.",
+        "headers": {
+          "ETag": { "required": true, "schema": { "type": "string" } },
+          "Content-Length": { "required": true, "schema": { "type": "integer", "minimum": 0 } }
+        }
+      },
+      "MutationCreated": {
+        "description": "File created; replay returns the original status and response.",
+        "headers": {
+          "ETag": { "required": true, "schema": { "type": "string" } },
+          "Idempotency-Replayed": { "required": true, "schema": { "type": "boolean" } }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MutationSuccess" } } }
+      },
+      "MutationUpdated": {
+        "description": "File overwritten or renamed; replay returns the original status and response.",
+        "headers": {
+          "ETag": { "required": true, "schema": { "type": "string" } },
+          "Idempotency-Replayed": { "required": true, "schema": { "type": "boolean" } }
+        },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MutationSuccess" } } }
+      },
+      "MutationDeleted": {
+        "description": "File deleted; replay returns the original status and response.",
+        "headers": { "Idempotency-Replayed": { "required": true, "schema": { "type": "boolean" } } },
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/MutationSuccess" } } }
+      },
+      "BadRequest": { "description": "BAD_REQUEST: invalid path, header or body.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unauthorized": { "description": "UNAUTHENTICATED: bearer token or session is invalid.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Forbidden": { "description": "FORBIDDEN: role or action is not permitted.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "NotFound": { "description": "NOT_FOUND: instance, capability, path or file is unavailable to this actor.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Conflict": { "description": "CONFLICT: destination exists or idempotency key has a different fingerprint.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "PreconditionFailed": { "description": "PRECONDITION_FAILED: current source ETag differs from If-Match.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "TooLarge": { "description": "CONTENT_TOO_LARGE: upload exceeds configured limit.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "BinaryFile": { "description": "BINARY_FILE: text operation targets a binary file.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "InvalidEncoding": { "description": "INVALID_ENCODING: uploaded text is not valid for the target encoding.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "PreconditionRequired": { "description": "PRECONDITION_REQUIRED: If-Match header is missing.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+      "Unavailable": { "description": "SERVICE_UNAVAILABLE: storage, backup or durable mutation dependency failed; mutationId may identify an in-flight attempt.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+    }
+  }
+}

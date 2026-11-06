@@ -1,3 +1,11 @@
+lara-rs (0.2.4-1) unstable; urgency=medium
+
+  * Add instance-scoped configuration routes and per-instance file policies.
+  * Protect text and artifact mutations with ETags, idempotency, and MongoDB audit.
+  * Extend CLI diagnostics and package the Release C read-only smoke test.
+
+ -- neverm1ndo <it@nmnd.ru>  Fri, 06 Nov 2026 22:00:18 +0300
+
 lara-rs (0.2.3-1) unstable; urgency=medium
 
   * Add durable Developer-only lifecycle operations for auxiliary instances.

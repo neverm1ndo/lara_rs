@@ -2321,7 +2321,7 @@ dependencies = [
 
 [[package]]
 name = "lara-rs"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -2339,6 +2339,7 @@ dependencies = [
  "glob",
  "hmac 0.12.1",
  "jsonwebtoken",
+ "libc",
  "md-5",
  "mongodb",
  "multer",

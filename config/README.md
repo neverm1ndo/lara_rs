@@ -149,6 +149,14 @@ capabilities = [
 readiness = "process"
 incident_tracking = true
 
+# Таблица относится к расположенному непосредственно перед ней auxiliary.
+# Для auxiliary с capability configuration она обязательна.
+[game_server.instances.configuration]
+fallback_encoding = "windows-1251"
+ignored_paths = ["logs", "scriptfiles/cache"]
+artifact_paths = []
+max_file_size_bytes = 10485760
+
 [game_server.storage]
 root = "/srv/openmp/main"
 max_tree_depth = 32
@@ -252,15 +260,20 @@ Diff ограничивается `max_input_size_bytes` и
 
 ## Кодировка файлов configuration API
 
-Файлы конфигурации SAMP/open.mp хранятся в кодировке из
-`configuration.files.fallback_encoding` (`windows-1251` по умолчанию). API не
-перекодирует содержимое и передаёт байты без изменений:
+Файлы конфигурации SAMP/open.mp хранятся в кодировке из эффективной политики
+инстанса (`windows-1251` по умолчанию). `configuration.files` задаёт defaults
+для primary и отсутствующих полей политики auxiliary. API не перекодирует
+содержимое и передаёт байты без изменений. Контракт Release C использует
+маршруты с ID инстанса:
 
-- `GET /configuration/files` возвращает поток с заголовком
-  `Content-Type: text/plain; charset=windows-1251`;
-- `POST /configuration/files` и `PUT /configuration/files` принимают
+- `GET /server-instances/{instance_id}/configuration/files` возвращает поток с
+  `Content-Type: text/plain; charset=<fallback_encoding>`;
+- `POST` и `PUT` на том же маршруте принимают
   `multipart/form-data` с единственной бинарной частью `file`, а путь — в
   query-параметре `path`.
+
+Это контракт для следующих шагов Release C. Пока маршруты не смонтированы,
+runtime `/openapi.json` их не содержит.
 
 Перед записью сервер проверяет, что байты допустимы для настроенной кодировки,
 но сохраняет их без декодирования и повторного кодирования. Клиент может
@@ -272,6 +285,54 @@ Diff ограничивается `max_input_size_bytes` и
 последовательности байтов однобайтовых кодировок по своей природе неоднозначны.
 
 ## Реестр игровых инстансов
+
+### Политика configuration для инстанса
+
+Для auxiliary с capability `configuration` обязательна таблица
+`[game_server.instances.configuration]` непосредственно после соответствующей
+записи `[[game_server.instances]]`. Даже пустая таблица означает явное включение
+политики с безопасными defaults; `lara instance add` создаёт её автоматически.
+Для существующего auxiliary используйте `lara instance edit <id>
+--capability ... --capability configuration`, передав полный набор capabilities:
+CLI создаст таблицу вместе с изменением реестра.
+У primary таблица необязательна, поэтому старый `configuration.files` остаётся
+допустимым входом. Таблица для инстанса без capability отклоняется.
+
+Допустимые поля: `fallback_encoding`, `binary_extensions`,
+`binary_file_names`, `ignored_paths`, `artifact_paths`, `max_tree_depth`,
+`max_tree_entries`, `max_file_size_bytes`. Отсутствующие поля наследуют
+`configuration.files` и лимиты `game_server.storage`, кроме `artifact_paths`:
+его default всегда пустой. Лимиты инстанса должны быть положительными и не
+превышать глобальные. Пути в `ignored_paths` и `artifact_paths` задаются
+относительно `storage_root` инстанса; абсолютные пути, `..`, дубликаты,
+пересекающиеся ignored-пути и артефакты внутри ignored subtree отклоняются.
+`artifact_paths` содержит точные пути бинарных файлов; executable, environment,
+секреты, native libraries и systemd-файлы запрещены даже при явном указании.
+При запуске для каждого инстанса с `configuration` проверяется политика и
+открывается отдельный файловый target на его canonical `storage_root`. Если
+каталог недоступен или два target указывают на пересекающиеся canonical roots,
+запуск завершается ошибкой с ID инстанса. Текстовый сервис уже использует target,
+сильный ETag и `If-Match`. Отдельный сервис бинарных артефактов разрешает
+Developer заменить только существующий файл по точному пути из `artifact_paths`,
+не перекодирует байты и не перезапускает игровой сервер. HTTP-маршруты
+доступны в instance-scoped API Release C.
+
+При добавлении или редактировании auxiliary можно задать политику без ручного
+редактирования TOML: `--configuration-encoding`, повторяемые
+`--configuration-artifact-path` и `--configuration-ignored-path`, а также
+`--configuration-binary-extension`, `--configuration-binary-file-name`,
+`--configuration-max-tree-depth`, `--configuration-max-tree-entries` и
+`--configuration-max-file-size-bytes`. Списки заменяются целиком;
+`--clear-configuration-artifact-paths` и `--clear-configuration-ignored-paths`
+очищают их. Параметры действуют только при capability `configuration`.
+`instance verify` и `doctor` проверяют существующие разрешённые артефакты
+только на чтение: отсутствие файла, symlink и превышение лимита дают ошибку.
+
+На Linux атомарная замена сохраняет mode и POSIX access ACL, а также требует
+сохранить владельца и группу исходного файла. Если пользователь `lara` не может
+создать временный файл с тем же UID/GID, операция завершится ошибкой до замены.
+При подготовке файлов для редактирования учитывайте это ограничение; CLI не меняет владельцев
+автоматически.
 
 `game_server.primary_instance` ссылается на единственную запись `kind =
 "primary"`. Primary использует `game_server.storage.root`, если `storage_root`

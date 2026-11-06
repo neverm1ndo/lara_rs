@@ -2,8 +2,9 @@ use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi};
 
 use super::dto::{
-    ConfigurationFileUpload, ConfigurationTreeEntryKindResponse, ConfigurationTreeEntryResponse,
-    ConfigurationTreeResponse, ErrorResponse, FileMutationResponse, RenameFileRequest,
+    ConfigurationFileUpload, ConfigurationMutationResponse, ConfigurationTreeEntryKindResponse,
+    ConfigurationTreeEntryResponse, ConfigurationTreeResponse, ErrorResponse, FileMutationResponse,
+    RenameFileRequest,
 };
 
 const BEARER_AUTH_SCHEME: &str = "bearerAuth";
@@ -17,7 +18,8 @@ const BEARER_AUTH_SCHEME: &str = "bearerAuth";
         ConfigurationTreeEntryKindResponse,
         RenameFileRequest,
         FileMutationResponse,
-        ErrorResponse
+        ErrorResponse,
+        ConfigurationMutationResponse
     )),
     modifiers(&BearerSecurity),
     tags((

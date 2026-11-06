@@ -1,6 +1,6 @@
 [package]
 name = "lara-rs"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 autobins = false
 authors = ["neverm1ndo <it@nmnd.ru>"]
@@ -33,6 +33,7 @@ assets = [
     ["deploy/systemd/README.md", "usr/share/doc/lara-rs/systemd-pilot.md", "644"],
     ["deploy/systemd/verify-pilot.sh", "usr/lib/lara-rs/verify-pilot", "755"],
     ["deploy/systemd/smoke-release-b.sh", "usr/lib/lara-rs/smoke-release-b", "755"],
+    ["deploy/systemd/smoke-release-c.sh", "usr/lib/lara-rs/smoke-release-c", "755"],
     ["deploy/systemd/lara-game@.service", "usr/lib/systemd/system/lara-game@.service", "644"],
     ["deploy/polkit/49-lara-rs.rules", "usr/share/polkit-1/rules.d/49-lara-rs.rules", "644"],
 ]
@@ -61,6 +62,7 @@ futures-util = "0.3.31"
 glob = "0.3.4"
 hmac = "0.12.1"
 jsonwebtoken = { version = "11.1.0", features = ["rust_crypto"] }
+libc = "0.2.190"
 md-5 = "0.11.0"
 mongodb = "3.9.1"
 multer = "3.1.0"

@@ -105,6 +105,17 @@ pub struct ErrorResponse {
     pub code: &'static str,
 }
 
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigurationMutationResponse {
+    pub mutation_id: String,
+    pub instance_id: String,
+    pub status: &'static str,
+    pub event_id: String,
+    pub event_type: &'static str,
+    pub occurred_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::TimeZone;
