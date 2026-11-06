@@ -85,6 +85,7 @@ enum HttpError {
     ContentTooLarge,
     Unavailable,
     ReconciliationRequired(String),
+    Reviewed(String),
 }
 
 impl From<ConfigurationMutationServiceError> for HttpError {
@@ -94,6 +95,7 @@ impl From<ConfigurationMutationServiceError> for HttpError {
             ConfigurationMutationServiceError::ReconciliationRequired(id) => {
                 Self::ReconciliationRequired(id)
             }
+            ConfigurationMutationServiceError::Reviewed(id) => Self::Reviewed(id),
             ConfigurationMutationServiceError::Unavailable => Self::Unavailable,
             ConfigurationMutationServiceError::Application(error) => error.into(),
         }
@@ -127,6 +129,14 @@ impl IntoResponse for HttpError {
             )
                 .into_response();
         }
+        if let Self::Reviewed(mutation_id) = &self {
+            return (
+                StatusCode::CONFLICT,
+                [(CACHE_CONTROL, "no-store")],
+                Json(serde_json::json!({"code": "CONFLICT", "mutationId": mutation_id})),
+            )
+                .into_response();
+        }
         let (status, code) = match self {
             Self::BadRequest => (StatusCode::BAD_REQUEST, "BAD_REQUEST"),
             Self::Unauthenticated => (StatusCode::UNAUTHORIZED, "UNAUTHENTICATED"),
@@ -142,6 +152,7 @@ impl IntoResponse for HttpError {
             Self::ContentTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, "CONTENT_TOO_LARGE"),
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE"),
             Self::ReconciliationRequired(_) => unreachable!(),
+            Self::Reviewed(_) => unreachable!(),
         };
         (
             status,

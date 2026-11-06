@@ -91,6 +91,18 @@ impl ConfigurationMutationLog for MongoConfigurationMutationLog {
         })
     }
 
+    fn by_id<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> MutationLogFuture<'a, Option<ConfigurationMutationRecord>> {
+        Box::pin(async move {
+            self.records
+                .find_one(doc! {"_id": id})
+                .await
+                .map_err(database_error)
+        })
+    }
+
     fn transition<'a>(
         &'a self,
         id: &'a str,

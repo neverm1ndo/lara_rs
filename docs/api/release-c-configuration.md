@@ -13,8 +13,8 @@ record can resume when the same key and request are submitted again. An
 A matching file hash alone cannot prove that the operation never ran: a file
 could have been changed and restored. Lara does not repeat an uncertain
 filesystem side effect. Operator review is required before unlocking that
-path. Automatic evidence-based completion remains a follow-up because the
-backup receipt and full event evidence may be unavailable after a crash.
+path. The operator records an assessment with `lara config mutation resolve`;
+this does not rewrite files or synthesize a missing file-change event.
 
 ## Routing and access
 
@@ -72,8 +72,8 @@ BAD_REQUEST`. A retry of an in-flight attempt with unresolved state returns
 the file operation a second time on uncertain evidence.
 
 The server records a durable intent before changing a file. Its states are
-`Requested`, `Applying`, `Succeeded`, `Failed` and
-`ReconciliationRequired`. An ambiguous external change after a crash is kept
+`Requested`, `Applying`, `Succeeded`, `Failed`, `ReconciliationRequired` and
+`Reviewed`. An ambiguous external change after a crash is kept
 for review in `ReconciliationRequired`. An HTTP success response is returned
 only after the mutation reaches `Succeeded` and its audit event is persisted.
 
@@ -120,6 +120,37 @@ The payload includes `schemaVersion`, `eventId`, `mutationId`, `instanceId`,
 Configurator projection omits events outside the configured primary subtree
 and sends paths relative to that subtree. Clients deduplicate by `eventId` and
 suppress their own toast when `actorUserId` matches the current user.
+
+## Operator review of interrupted mutations
+
+When a mutation is `ReconciliationRequired`, Lara retains its path lock and
+returns `503` with `mutationId`. Inspect the durable record and current file
+hashes on the host:
+
+```sh
+sudo lara config mutation inspect MUTATION_ID --output json
+```
+
+Compare `observedSource` and `observedDestination` with the operation, expected
+hash, desired hash, server logs and any backup receipt. Then record the human
+assessment using the `evidenceToken` from that inspection:
+
+```sh
+sudo lara config mutation resolve MUTATION_ID \
+  --evidence-token TOKEN \
+  --reviewer OPERATOR \
+  --reason 'Checked server files and journal' \
+  --assessment indeterminate \
+  --yes
+```
+
+`applied`, `not-applied` and `indeterminate` are operator assessments, not
+automatic proof. `resolve` rechecks the evidence token, writes the assessment
+and releases the path lock without changing a file. On Linux, `resolve` requires
+root privileges. The old idempotency key
+then returns `409 CONFLICT`; use a new key only for a newly reviewed action.
+The `Reviewed` record remains in the MongoDB audit history. No
+`configuration.file-changed.v1` event is fabricated for it.
 
 ## Migration
 

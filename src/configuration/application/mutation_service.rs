@@ -70,6 +70,8 @@ pub enum ConfigurationMutationServiceError {
     Conflict,
     #[error("mutation outcome requires reconciliation: {0}")]
     ReconciliationRequired(String),
+    #[error("mutation was reviewed by an operator: {0}")]
+    Reviewed(String),
     #[error("mutation log unavailable")]
     Unavailable,
     #[error(transparent)]
@@ -165,6 +167,7 @@ impl ConfigurationMutationService {
             delivered_at: None,
             delivery_lease_until: None,
             delivery_lease_token: None,
+            review: None,
         };
         match self.log.reserve(&record).await {
             Ok(()) => {}
@@ -408,6 +411,9 @@ fn replay(
         ConfigurationMutationState::Failed => Err(ConfigurationMutationServiceError::Application(
             error_from_code(record.failure_code.as_deref()),
         )),
+        ConfigurationMutationState::Reviewed => {
+            Err(ConfigurationMutationServiceError::Reviewed(record.id))
+        }
         _ => Err(ConfigurationMutationServiceError::ReconciliationRequired(
             record.id,
         )),
@@ -564,6 +570,12 @@ mod tests {
                     .find(|item| item.actor_user_id == actor && item.idempotency_key == key)
                     .cloned())
             })
+        }
+        fn by_id<'a>(
+            &'a self,
+            id: &'a str,
+        ) -> MutationLogFuture<'a, Option<ConfigurationMutationRecord>> {
+            Box::pin(async move { Ok(self.0.lock().unwrap().get(id).cloned()) })
         }
         fn transition<'a>(
             &'a self,
@@ -743,6 +755,7 @@ mod tests {
             delivered_at: None,
             delivery_lease_until: None,
             delivery_lease_token: None,
+            review: None,
         };
         log.0.lock().unwrap().insert(id.clone(), record);
         assert_eq!(
@@ -822,6 +835,7 @@ mod tests {
             delivered_at: None,
             delivery_lease_until: None,
             delivery_lease_token: None,
+            review: None,
         };
         log.0.lock().unwrap().insert(record.id.clone(), record);
         assert_eq!(
@@ -863,6 +877,7 @@ mod tests {
             delivered_at: None,
             delivery_lease_until: None,
             delivery_lease_token: None,
+            review: None,
         };
         let id = record.id.clone();
         log.0.lock().unwrap().insert(id.clone(), record);
@@ -880,5 +895,34 @@ mod tests {
             ConfigurationMutationState::ReconciliationRequired
         );
         assert_eq!(saved.active_path.as_deref(), Some("test:new.cfg"));
+    }
+
+    #[test]
+    fn reviewed_mutation_cannot_be_replayed_as_a_success() {
+        let record = ConfigurationMutationRecord {
+            id: "reviewed-id".into(),
+            actor_user_id: "42".into(),
+            idempotency_key: "key".into(),
+            fingerprint: "fingerprint".into(),
+            instance_id: "test".into(),
+            operation: "create".into(),
+            source: None,
+            destination: Some("server.cfg".into()),
+            expected_hash: None,
+            desired_hash: None,
+            active_path: None,
+            state: ConfigurationMutationState::Reviewed,
+            created_at: "requested".into(),
+            updated_at: "reviewed".into(),
+            event: None,
+            failure_code: None,
+            delivered_at: None,
+            delivery_lease_until: None,
+            delivery_lease_token: None,
+            review: None,
+        };
+        assert!(
+            matches!(replay(record, "fingerprint"), Err(ConfigurationMutationServiceError::Reviewed(id)) if id == "reviewed-id")
+        );
     }
 }

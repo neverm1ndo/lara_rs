@@ -11,6 +11,35 @@ pub enum ConfigurationMutationState {
     Succeeded,
     Failed,
     ReconciliationRequired,
+    Reviewed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigurationReviewAssessment {
+    Applied,
+    NotApplied,
+    Indeterminate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigurationMutationReview {
+    pub reviewer: String,
+    pub reason: String,
+    pub assessment: ConfigurationReviewAssessment,
+    pub observed_source: ConfigurationFileEvidence,
+    pub observed_destination: ConfigurationFileEvidence,
+    pub evidence_token: String,
+    pub reviewed_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", content = "detail", rename_all = "snake_case")]
+pub enum ConfigurationFileEvidence {
+    Absent,
+    Hash(String),
+    Unavailable(String),
+    NotApplicable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +81,8 @@ pub struct ConfigurationMutationRecord {
     pub delivered_at: Option<String>,
     pub delivery_lease_until: Option<String>,
     pub delivery_lease_token: Option<String>,
+    #[serde(default)]
+    pub review: Option<ConfigurationMutationReview>,
 }
 
 #[derive(Debug, Error)]
@@ -71,6 +102,10 @@ pub trait ConfigurationMutationLog: Send + Sync {
         &'a self,
         actor: &'a str,
         key: &'a str,
+    ) -> MutationLogFuture<'a, Option<ConfigurationMutationRecord>>;
+    fn by_id<'a>(
+        &'a self,
+        id: &'a str,
     ) -> MutationLogFuture<'a, Option<ConfigurationMutationRecord>>;
     fn transition<'a>(
         &'a self,

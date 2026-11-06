@@ -94,6 +94,12 @@ mod tests {
         ) -> MutationLogFuture<'a, Option<ConfigurationMutationRecord>> {
             Box::pin(async { Ok(None) })
         }
+        fn by_id<'a>(
+            &'a self,
+            _: &'a str,
+        ) -> MutationLogFuture<'a, Option<ConfigurationMutationRecord>> {
+            Box::pin(async { Ok(None) })
+        }
         fn transition<'a>(
             &'a self,
             _: &'a str,
@@ -181,6 +187,7 @@ mod tests {
             delivered_at: None,
             delivery_lease_until: None,
             delivery_lease_token: None,
+            review: None,
         }
     }
 

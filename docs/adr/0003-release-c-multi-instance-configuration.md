@@ -215,23 +215,24 @@ Filesystem и MongoDB не образуют общую транзакцию. П�
 revision и hash желаемого содержимого:
 
 ```text
-Requested -> Applying -> Succeeded | Failed | ReconciliationRequired
+Requested -> Applying -> Succeeded | Failed | ReconciliationRequired -> Reviewed
 ```
 
 Повтор запроса с тем же ключом и fingerprint возвращает исходную mutation, а
-другой payload с тем же ключом получает `409`. После рестарта reconciliation
-сравнивает source/destination, expected revision и фактические hashes:
+другой payload с тем же ключом получает `409`. `Requested` ещё не начинал
+файловый side effect и может продолжиться по тому же ключу. После рестарта
+`Applying` переводится в `ReconciliationRequired` и удерживает блокировку пути.
+Совпадение хеша с expected или desired не доказывает, что операция не
+выполнялась: другой процесс мог изменить и восстановить файл.
 
-- уже применённый desired hash завершает mutation как `Succeeded` без повторной
-  записи;
-- неизменившаяся expected revision позволяет безопасно продолжить операцию;
-- неоднозначное внешнее изменение переводит запись в
-  `ReconciliationRequired` и не перезаписывается автоматически.
-
-Для delete и rename сохраняется достаточно before/after evidence, чтобы
-отличить уже завершённый side effect от стороннего изменения. HTTP сообщает
-успех только после terminal `Succeeded`, но durable intent позволяет объяснить
-и восстановить crash window между filesystem replace и MongoDB update.
+Оператор просматривает запись и текущее состояние source/destination через
+`lara config mutation inspect`. Команда `resolve` повторно наблюдает файлы,
+сравнивает evidence token и атомарно сохраняет решение, оператора и причину.
+Она переводит запись в `Reviewed` и снимает блокировку, не изменяя файлы и не
+создавая задним числом `configuration.file-changed.v1`. Старый idempotency key
+остаётся закрытым. Даже assessment `applied` означает вывод оператора, а не
+доказанный автоматикой успех. HTTP сообщает успех только после сохранённого
+`Succeeded` вместе с исходным событием.
 
 Успешная mutation создаёт versioned `configuration.file-changed.v1` с:
 
@@ -356,14 +357,11 @@ filesystem границы и отсутствие symlink, но не измен�
 
 ### 7. Сделать mutation и audit долговечными
 
-Текущее состояние: intent, terminal audit и embedded outbox записываются в
-MongoDB; повтор `Requested` с тем же ключом безопасно продолжает операцию.
-После рестарта `Applying` консервативно переводится в
-`ReconciliationRequired` с сохранением блокировки пути. Совпадение хеша само
-по себе не доказывает, что операция не выполнялась: файл могли изменить и
-вернуть. Контролируемое разрешение неоднозначного состояния и автоматическая
-проверка дополнительного evidence ещё не реализованы; их необходимо завершить
-до объявления шага 7 закрытым.
+Реализовано: intent, terminal audit и embedded outbox записываются в MongoDB;
+повтор `Requested` с тем же ключом безопасно продолжает операцию. `Applying`
+после рестарта консервативно переводится в `ReconciliationRequired` с
+сохранением блокировки пути. CLI предоставляет просмотр evidence и
+контролируемое разрешение с записью решения оператора в тот же журнал.
 
 - реализовать `ConfigurationMutation`, MongoDB repository и indexes;
 - сохранять intent до filesystem side effect и реализовать reconciliation
