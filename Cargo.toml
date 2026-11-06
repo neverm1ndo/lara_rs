@@ -1,6 +1,6 @@
 [package]
 name = "lara-rs"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2024"
 autobins = false
 authors = ["neverm1ndo <it@nmnd.ru>"]
