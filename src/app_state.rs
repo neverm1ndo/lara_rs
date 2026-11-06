@@ -12,8 +12,14 @@ use crate::auth::{
 use crate::{
     backups::{application::lifecycle::BackupLifecycleService, presentation::state::BackupsState},
     configuration::{
-        application::file_service::ConfigurationFileService,
-        presentation::{authorization::ConfigurationAuthorizationState, state::ConfigurationState},
+        application::{
+            artifact_service::ConfigurationArtifactService, file_service::ConfigurationFileService,
+            instance_text::InstanceConfigurationTextService, target::ConfigurationTargetResolver,
+        },
+        presentation::{
+            authorization::ConfigurationAuthorizationState,
+            instance_state::InstanceConfigurationState, state::ConfigurationState,
+        },
     },
     maps::{application::file_service::MapsFileService, presentation::state::MapsState},
     server_instances::application::{
@@ -36,6 +42,9 @@ pub struct AppState {
     lifecycle_operation_service: Arc<LifecycleOperationService>,
     configurator_directory: RelativeStoragePath,
     configuration_file_service: Arc<dyn ConfigurationFileService>,
+    configuration_target_resolver: Arc<dyn ConfigurationTargetResolver>,
+    instance_text_service: Arc<dyn InstanceConfigurationTextService>,
+    artifact_service: Arc<dyn ConfigurationArtifactService>,
     configuration_file_encoding: &'static Encoding,
     configuration_file_upload_limit_bytes: u64,
     maps_file_service: Arc<dyn MapsFileService>,
@@ -55,6 +64,9 @@ impl AppState {
         lifecycle_operation_service: Arc<LifecycleOperationService>,
         configurator_directory: RelativeStoragePath,
         configuration_file_service: impl ConfigurationFileService + 'static,
+        configuration_target_resolver: Arc<dyn ConfigurationTargetResolver>,
+        instance_text_service: Arc<dyn InstanceConfigurationTextService>,
+        artifact_service: Arc<dyn ConfigurationArtifactService>,
         configuration_file_encoding: &'static Encoding,
         configuration_file_upload_limit_bytes: u64,
         maps_file_service: impl MapsFileService + 'static,
@@ -71,12 +83,27 @@ impl AppState {
             lifecycle_operation_service,
             configurator_directory,
             configuration_file_service: Arc::new(configuration_file_service),
+            configuration_target_resolver,
+            instance_text_service,
+            artifact_service,
             configuration_file_encoding,
             configuration_file_upload_limit_bytes,
             maps_file_service: Arc::new(maps_file_service),
             maps_upload_limits,
             backup_lifecycle_service,
         }
+    }
+}
+
+impl InstanceConfigurationState for AppState {
+    fn configuration_target_resolver(&self) -> Arc<dyn ConfigurationTargetResolver> {
+        Arc::clone(&self.configuration_target_resolver)
+    }
+    fn instance_text_service(&self) -> Arc<dyn InstanceConfigurationTextService> {
+        Arc::clone(&self.instance_text_service)
+    }
+    fn artifact_service(&self) -> Arc<dyn ConfigurationArtifactService> {
+        Arc::clone(&self.artifact_service)
     }
 }
 

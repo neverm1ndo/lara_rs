@@ -164,9 +164,6 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
 
 struct BuiltApplication {
     router: Router,
-    _configuration_target_resolver: Arc<dyn ConfigurationTargetResolver>,
-    _instance_text_service: Arc<dyn InstanceConfigurationTextService>,
-    _artifact_service: Arc<dyn ConfigurationArtifactService>,
     maintenance_worker: BackupMaintenanceWorker,
     systemd_observer: Option<SystemdObserverWorker>,
     lifecycle_reconciliation: Option<LifecycleReconciliationWorker>,
@@ -504,6 +501,9 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         lifecycle_operation_service,
         configurator_directory,
         configuration_file_service,
+        configuration_target_resolver,
+        instance_text_service,
+        artifact_service,
         configuration_encoding,
         storage_limits.max_stream_size_bytes,
         maps_file_service,
@@ -515,6 +515,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
 
     let (router, openapi) = OpenApiRouter::<AppState>::with_openapi(openapi)
         .merge(server_instances::presentation::router::<AppState>())
+        .merge(crate::configuration::presentation::instance_routes::router::<AppState>())
         .nest("/auth", auth::presentation::mfa_router::<AppState>())
         .nest("/maps", maps::presentation::router::<AppState>())
         .nest("/backups", backups::presentation::router::<AppState>())
@@ -526,9 +527,6 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         router: router
             .merge(auth::presentation::openapi_router(openapi))
             .layer(socket_io_layer),
-        _configuration_target_resolver: configuration_target_resolver,
-        _instance_text_service: instance_text_service,
-        _artifact_service: artifact_service,
         maintenance_worker,
         systemd_observer,
         lifecycle_reconciliation,
@@ -538,6 +536,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
 
 fn base_openapi_document() -> utoipa::openapi::OpenApi {
     auth::presentation::openapi_document()
+        .merge_from(crate::configuration::presentation::openapi_document())
         .merge_from(maps::presentation::openapi_document())
         .merge_from(backups::presentation::openapi_document())
         .merge_from(server_instances::presentation::openapi_document())
@@ -641,9 +640,24 @@ mod tests {
         }
     }
 
+    impl crate::configuration::presentation::instance_state::InstanceConfigurationState
+        for DocumentationState
+    {
+        fn configuration_target_resolver(&self) -> Arc<dyn ConfigurationTargetResolver> {
+            panic!("documentation only")
+        }
+        fn instance_text_service(&self) -> Arc<dyn InstanceConfigurationTextService> {
+            panic!("documentation only")
+        }
+        fn artifact_service(&self) -> Arc<dyn ConfigurationArtifactService> {
+            panic!("documentation only")
+        }
+    }
+
     fn documented_routes() -> OpenApiRouter<DocumentationState> {
         OpenApiRouter::<DocumentationState>::with_openapi(base_openapi_document())
             .merge(crate::server_instances::presentation::router())
+            .merge(crate::configuration::presentation::instance_routes::router())
             .nest("/auth", auth::presentation::mfa_router())
             .nest("/maps", maps::presentation::router())
             .nest("/backups", backups::presentation::router())
@@ -666,8 +680,19 @@ mod tests {
         assert!(specification["paths"]["/configuration/files"].is_null());
         assert!(specification["paths"]["/configuration/files/rename"].is_null());
         assert!(
-            specification["paths"]["/server-instances/{instance_id}/configuration/tree"].is_null()
+            specification["paths"]["/server-instances/{instance_id}/configuration/tree"]["get"]
+                .is_object()
         );
+        let base = "/server-instances/{instance_id}/configuration";
+        for (suffix, methods) in [
+            ("/files", &["get", "post", "put", "delete"][..]),
+            ("/files/rename", &["patch"][..]),
+            ("/artifacts", &["head", "put"][..]),
+        ] {
+            for method in methods {
+                assert!(specification["paths"][format!("{base}{suffix}")][method].is_object());
+            }
+        }
         assert!(specification["paths"]["/maps/files"]["post"].is_object());
         assert!(specification["paths"]["/backups/list"]["get"].is_object());
         assert!(specification["paths"]["/backups/backup/{backup_id}"]["get"].is_object());
@@ -699,6 +724,49 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn instance_configuration_routes_require_a_session() {
+        let (router, _) = documented_routes()
+            .with_state(DocumentationState)
+            .split_for_parts();
+        for (method, uri) in [
+            ("GET", "/server-instances/test/configuration/tree"),
+            (
+                "GET",
+                "/server-instances/test/configuration/files?path=server.cfg",
+            ),
+            (
+                "POST",
+                "/server-instances/test/configuration/files?path=server.cfg",
+            ),
+            (
+                "HEAD",
+                "/server-instances/test/configuration/artifacts?path=mod.so",
+            ),
+            (
+                "PUT",
+                "/server-instances/test/configuration/artifacts?path=mod.so",
+            ),
+        ] {
+            let response = router
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
         }
     }
 

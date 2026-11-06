@@ -54,6 +54,9 @@ pub struct FeatureAccessResponse {
 #[serde(rename_all = "snake_case")]
 pub enum FeaturePermissionResponse {
     Read,
+    Browse,
+    ReadText,
+    InspectArtifact,
     Start,
     Stop,
     Restart,
@@ -490,6 +493,9 @@ impl From<FeaturePermission> for FeaturePermissionResponse {
     fn from(permission: FeaturePermission) -> Self {
         match permission {
             FeaturePermission::Read => Self::Read,
+            FeaturePermission::Browse => Self::Browse,
+            FeaturePermission::ReadText => Self::ReadText,
+            FeaturePermission::InspectArtifact => Self::InspectArtifact,
             FeaturePermission::Start => Self::Start,
             FeaturePermission::Stop => Self::Stop,
             FeaturePermission::Restart => Self::Restart,

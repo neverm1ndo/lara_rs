@@ -3,7 +3,7 @@
   "info": {
     "title": "Lara Release C configuration contract",
     "version": "1.0.0",
-    "description": "Contract-first specification for the instance-scoped configuration API. These operations are not mounted until Release C implementation is complete."
+    "description": "Full Release C contract for the instance-scoped configuration API. Read operations are mounted at step 6; mutating routes return 503 until durable mutation handling is connected in step 7."
   },
   "security": [{ "bearerAuth": [] }],
   "paths": {

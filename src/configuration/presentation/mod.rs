@@ -10,5 +10,7 @@ pub use openapi::base_document as openapi_document;
 #[allow(unused_imports)]
 pub use routes::router;
 
+pub mod instance_routes;
+pub mod instance_state;
 #[cfg(test)]
 mod tests;

@@ -6,6 +6,13 @@ fixture for implementation and client development. The production `/openapi.json
 contains only mounted endpoints. The Release C routes appear there when the
 instance-scoped service is wired in step 6.
 
+Implementation checkpoint (step 6): the instance-scoped tree, text read and
+artifact metadata routes are mounted. Mutation routes are present but return
+`503 SERVICE_UNAVAILABLE` after authorization until step 7 connects durable
+intent, audit and retry handling. The live manifest advertises only available
+read actions (`browse`, `read_text`, and Developer-only `inspect_artifact`).
+The JSON fixture describes the completed Release C contract.
+
 ## Routing and access
 
 All routes begin with `/server-instances/{instance_id}/configuration`.

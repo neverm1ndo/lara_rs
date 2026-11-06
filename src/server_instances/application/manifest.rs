@@ -93,6 +93,9 @@ pub struct FeatureAccess {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum FeaturePermission {
     Read,
+    Browse,
+    ReadText,
+    InspectArtifact,
     Start,
     Stop,
     Restart,
@@ -106,6 +109,9 @@ impl FeaturePermission {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Read => "read",
+            Self::Browse => "browse",
+            Self::ReadText => "read_text",
+            Self::InspectArtifact => "inspect_artifact",
             Self::Start => "start",
             Self::Stop => "stop",
             Self::Restart => "restart",
@@ -198,12 +204,12 @@ fn permissions_for(
         }
         InstanceCapability::Lifecycle if developer => vec![FeaturePermission::Read],
         InstanceCapability::Configuration if developer => vec![
-            FeaturePermission::Read,
-            FeaturePermission::Write,
-            FeaturePermission::UploadArtifact,
+            FeaturePermission::Browse,
+            FeaturePermission::ReadText,
+            FeaturePermission::InspectArtifact,
         ],
         InstanceCapability::Configuration if subject.has_role(UserRole::Configurator) => {
-            vec![FeaturePermission::Read, FeaturePermission::Write]
+            vec![FeaturePermission::Browse, FeaturePermission::ReadText]
         }
         InstanceCapability::Maps if developer || subject.has_role(UserRole::Mapper) => {
             vec![FeaturePermission::Read, FeaturePermission::Write]
@@ -353,6 +359,14 @@ mod tests {
                 .features
                 .contains_key(&FeatureId::Backups)
         );
+        assert_eq!(
+            manifest.instances[1].features[&FeatureId::Configuration].permissions,
+            [
+                FeaturePermission::Browse,
+                FeaturePermission::ReadText,
+                FeaturePermission::InspectArtifact
+            ]
+        );
     }
 
     #[test]
@@ -370,6 +384,12 @@ mod tests {
             assert!(features.contains_key(&FeatureId::Overview));
             assert!(features.contains_key(&expected));
             assert!(!features.contains_key(&FeatureId::Lifecycle));
+            if role == UserRole::Configurator {
+                assert_eq!(
+                    features[&FeatureId::Configuration].permissions,
+                    [FeaturePermission::Browse, FeaturePermission::ReadText]
+                );
+            }
         }
     }
 
