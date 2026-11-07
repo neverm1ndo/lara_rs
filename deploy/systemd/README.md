@@ -7,6 +7,14 @@
 
 ## Установка Debian-пакета Lara
 
+Для восстановления инцидентов после простоя Lara нужен persistent journald
+(`Storage=persistent` в `journald.conf` либо каталог `/var/log/journal`) и
+доступ сервисной учётной записи к системному журналу. Пакетный
+`lara-rs.service` добавляет `systemd-journal` в `SupplementaryGroups`.
+После изменения настроек перезапустите journald и Lara. При отсутствии
+журнала, прав или сохранённого cursor Lara пишет диагностическую запись в
+`server_instance_incident_gaps`; неизвестный интервал не становится инцидентом.
+
 Release artifact рассчитан на Debian 12 (`amd64`). Пакет устанавливает бинарник,
 `lara-rs.service`, шаблон `lara-game@.service`, минимальное polkit-правило,
 примеры конфигурации и утилиты `/usr/lib/lara-rs/verify-pilot` и

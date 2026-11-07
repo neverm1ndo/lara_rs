@@ -10,6 +10,7 @@ use zbus::{Connection, Proxy, zvariant::OwnedObjectPath};
 use crate::server_instances::{
     application::{
         incident_service::IncidentObservation,
+        journal_replay::IncidentReplay,
         lifecycle_events::{
             LifecycleEventDelivery, ServerInstanceEvent, ServerInstanceStateChangedEvent,
         },
@@ -63,6 +64,7 @@ pub struct SystemdObserverWorker {
     states: Arc<dyn RuntimeStateWriter>,
     events: Option<Arc<dyn LifecycleEventDelivery>>,
     incidents: Option<Arc<dyn IncidentObservation>>,
+    replay: Option<Arc<dyn IncidentReplay>>,
 }
 
 impl SystemdObserverWorker {
@@ -75,6 +77,7 @@ impl SystemdObserverWorker {
             states,
             events: None,
             incidents: None,
+            replay: None,
         }
     }
 
@@ -85,6 +88,11 @@ impl SystemdObserverWorker {
 
     pub fn with_incident_observation(mut self, incidents: Arc<dyn IncidentObservation>) -> Self {
         self.incidents = Some(incidents);
+        self
+    }
+
+    pub fn with_journal_replay(mut self, replay: Arc<dyn IncidentReplay>) -> Self {
+        self.replay = Some(replay);
         self
     }
 
@@ -102,9 +110,10 @@ impl SystemdObserverWorker {
             let states = Arc::clone(&self.states);
             let events = self.events.clone();
             let incidents = self.incidents.clone();
+            let replay = self.replay.clone();
             let target_shutdown = shutdown.clone();
             tasks.spawn(async move {
-                observe_target(target, states, events, incidents, target_shutdown).await;
+                observe_target(target, states, events, incidents, replay, target_shutdown).await;
             });
         }
 
@@ -125,6 +134,7 @@ async fn observe_target(
     states: Arc<dyn RuntimeStateWriter>,
     events: Option<Arc<dyn LifecycleEventDelivery>>,
     incidents: Option<Arc<dyn IncidentObservation>>,
+    replay: Option<Arc<dyn IncidentReplay>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut memory = ObservationMemory::default();
@@ -139,6 +149,7 @@ async fn observe_target(
             &states,
             events.as_ref(),
             incidents.as_ref(),
+            replay.as_ref(),
             &mut shutdown,
             &mut memory,
         )
@@ -189,6 +200,7 @@ async fn observe_connected(
     states: &Arc<dyn RuntimeStateWriter>,
     events: Option<&Arc<dyn LifecycleEventDelivery>>,
     incidents: Option<&Arc<dyn IncidentObservation>>,
+    replay: Option<&Arc<dyn IncidentReplay>>,
     shutdown: &mut watch::Receiver<bool>,
     memory: &mut ObservationMemory,
 ) -> Result<(), SystemdObserverError> {
@@ -220,6 +232,7 @@ async fn observe_connected(
         states,
         events,
         incidents,
+        replay,
         memory,
     )
     .await?;
@@ -234,15 +247,16 @@ async fn observe_connected(
                 if change.is_none() {
                     return Err(SystemdObserverError::SignalStreamEnded);
                 }
-                refresh(&connection, &path, target, states, events, incidents, memory).await?;
+                refresh(&connection, &path, target, states, events, incidents, replay, memory).await?;
             }
             _ = reconciliation.tick() => {
-                refresh(&connection, &path, target, states, events, incidents, memory).await?;
+                refresh(&connection, &path, target, states, events, incidents, replay, memory).await?;
             }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn refresh(
     connection: &Connection,
     path: &OwnedObjectPath,
@@ -250,6 +264,7 @@ async fn refresh(
     states: &Arc<dyn RuntimeStateWriter>,
     events: Option<&Arc<dyn LifecycleEventDelivery>>,
     incidents: Option<&Arc<dyn IncidentObservation>>,
+    replay: Option<&Arc<dyn IncidentReplay>>,
     memory: &mut ObservationMemory,
 ) -> Result<(), SystemdObserverError> {
     let observation = read_unit(connection, path).await?;
@@ -263,7 +278,29 @@ async fn refresh(
     );
     let state = observation.normalize(target, Utc::now());
     states.put(state.clone())?;
+    let mut replay_failed = false;
+    let journal_available = if target.incident_tracking {
+        if let Some(replay) = replay {
+            match replay.replay(&target.instance_id, &target.unit_name).await {
+                Ok(available) => available,
+                Err(error) => {
+                    warn!(instance_id = %target.instance_id, %error, "failed to persist journal replay");
+                    replay_failed = true;
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if journal_available {
+        memory.incident = Some(state.clone());
+    }
     if target.incident_tracking
+        && !journal_available
+        && !replay_failed
         && let Some(incidents) = incidents
     {
         match incidents

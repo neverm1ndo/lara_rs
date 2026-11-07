@@ -1,6 +1,7 @@
 pub mod config_registry;
 pub mod incident_operation_lookup;
 pub mod incident_repository;
+pub mod journal_reader;
 pub mod lifecycle_event_dispatcher;
 pub mod lifecycle_operation_repository;
 pub mod lifecycle_operation_support;

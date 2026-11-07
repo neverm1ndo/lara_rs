@@ -136,4 +136,21 @@ pub trait IncidentCheckpointRepository: Send + Sync {
         checkpoint: &'a JournalCheckpoint,
         expected_version: Option<u64>,
     ) -> IncidentStoreFuture<'a, ()>;
+    fn record_gap<'a>(&'a self, gap: &'a JournalGap) -> IncidentStoreFuture<'a, ()>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JournalGap {
+    pub instance_id: ServerInstanceId,
+    pub previous_cursor: Option<String>,
+    pub reason: JournalGapReason,
+    pub detected_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum JournalGapReason {
+    CursorExpired,
+    ReadFailure,
+    PersistentStorageMissing,
 }

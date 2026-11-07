@@ -71,9 +71,11 @@ boot ID и journald cursor для journal; для live D-Bus — сравнен�
 один инцидент по доказанной идентичности запуска и интервалу, а не только по
 похожим временным меткам.
 
-Отдельный `observation gap` хранит начало/конец неизвестного интервала,
-причину (`journal_unavailable`, `cursor_expired`, `permission_denied` и т.п.)
-и время обнаружения. Gap не является инцидентом игрового процесса.
+Отдельный `observation gap` хранит instance, предыдущий cursor (если был),
+причину (`read_failure`, `cursor_expired`, `persistent_storage_missing`)
+и время обнаружения. Это якорь неизвестного интервала; его точные границы
+не выводятся из отсутствующих данных. Gap не является инцидентом игрового
+процесса.
 
 На шаге 3 созданы MongoDB collections `server_instance_incidents` и
 `server_instance_incident_checkpoints`. Уникальный multikey index по ключам
@@ -83,6 +85,20 @@ boot ID и journald cursor для journal; для live D-Bus — сравнен�
 и пополняется тем же атомарным update; после истечения аренды событие можно
 выдать повторно с прежним `eventId`. Checkpoint обновляется отдельным CAS и
 должен продвигаться только после долговечной обработки journal entry.
+
+На шаге 5 добавлен read-only adapter к libsystemd. Он читает только manager
+entries для точного `UNIT` с доверенным `_PID=1`, извлекает `MESSAGE_ID`,
+`RESULT`, `_BOOT_ID`, cursor и время; текст `MESSAGE` не разбирается.
+Обрабатываются `UNIT_FAILURE_RESULT` и `UNIT_STARTED`; каждая запись
+продвигает per-instance checkpoint после записи инцидента. Проверка
+`sd_journal_test_cursor` отличает найденный cursor от ближайшей записи
+после rotation; пробел сохраняется в `server_instance_incident_gaps`.
+При доступном persistent journal replay проходит до обработки текущего
+D-Bus snapshot и выполняется снова при каждом refresh/reconnect. Это
+покрывает события между snapshot и подпиской; повтор безопасен по fact ID.
+Доступ к системному журналу обеспечивается группой `systemd-journal` для
+пакетного сервиса Lara. Фактический набор сообщений на целевом Debian host
+нужно проверить пилотом шага 9.
 
 ## Переходы и классификация
 

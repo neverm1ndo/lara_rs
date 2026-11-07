@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::server_instances::{
     application::incidents::{
         ClaimedIncidentEvent, IncidentCheckpointRepository, IncidentOutbox, IncidentOutboxEvent,
-        IncidentRepository, IncidentStoreError, IncidentStoreFuture, JournalCheckpoint,
+        IncidentRepository, IncidentStoreError, IncidentStoreFuture, JournalCheckpoint, JournalGap,
     },
     domain::{
         Incident, IncidentCause, IncidentConfidence, IncidentEvidence, IncidentFactId, IncidentId,
@@ -24,12 +24,14 @@ use crate::server_instances::{
 
 const INCIDENTS: &str = "server_instance_incidents";
 const CHECKPOINTS: &str = "server_instance_incident_checkpoints";
+const GAPS: &str = "server_instance_incident_gaps";
 const DUPLICATE_KEY: i32 = 11_000;
 
 #[derive(Clone)]
 pub struct MongoIncidentRepository {
     incidents: Collection<IncidentDocument>,
     checkpoints: Collection<CheckpointDocument>,
+    gaps: Collection<GapDocument>,
 }
 
 impl MongoIncidentRepository {
@@ -37,6 +39,7 @@ impl MongoIncidentRepository {
         Self {
             incidents: database.collection(INCIDENTS),
             checkpoints: database.collection(CHECKPOINTS),
+            gaps: database.collection(GAPS),
         }
     }
 
@@ -90,6 +93,19 @@ impl MongoIncidentRepository {
                     .options(
                         IndexOptions::builder()
                             .name(Some("incident_checkpoint_boot".into()))
+                            .build(),
+                    )
+                    .build(),
+            )
+            .await
+            .map_err(db_error)?;
+        self.gaps
+            .create_index(
+                IndexModel::builder()
+                    .keys(doc! { "instance_id": 1, "detected_at": -1 })
+                    .options(
+                        IndexOptions::builder()
+                            .name(Some("incident_gaps_history".into()))
                             .build(),
                     )
                     .build(),
@@ -339,6 +355,39 @@ impl IncidentCheckpointRepository for MongoIncidentRepository {
             Ok(())
         })
     }
+
+    fn record_gap<'a>(&'a self, gap: &'a JournalGap) -> IncidentStoreFuture<'a, ()> {
+        Box::pin(async move {
+            let id = format!(
+                "{}:{}:{:?}",
+                gap.instance_id,
+                gap.previous_cursor.as_deref().unwrap_or("initial"),
+                gap.reason
+            );
+            let document = GapDocument {
+                id: format!("{:x}", Sha256::digest(id.as_bytes())),
+                instance_id: gap.instance_id.to_string(),
+                previous_cursor: gap.previous_cursor.clone(),
+                reason: gap.reason,
+                detected_at: bson_time(gap.detected_at),
+            };
+            match self.gaps.insert_one(document).await {
+                Ok(_) => Ok(()),
+                Err(error) if duplicate_key(&error) => Ok(()),
+                Err(error) => Err(db_error(error)),
+            }
+        })
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GapDocument {
+    #[serde(rename = "_id")]
+    id: String,
+    instance_id: String,
+    previous_cursor: Option<String>,
+    reason: crate::server_instances::application::incidents::JournalGapReason,
+    detected_at: BsonDateTime,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

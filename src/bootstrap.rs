@@ -85,7 +85,8 @@ use crate::{
             incident_service::{
                 IncidentObservation, IncidentObservationService, IncidentOperationLookup,
             },
-            incidents::IncidentRepository,
+            incidents::{IncidentCheckpointRepository, IncidentRepository},
+            journal_replay::{IncidentReplay, JournalReader, JournalReplayService},
             lifecycle_events::{LifecycleEventDelivery, LifecycleEventOutbox},
             lifecycle_reconciliation::LifecycleReconciler,
             lifecycle_service::LifecycleOperationService,
@@ -96,6 +97,7 @@ use crate::{
         infrastructure::{
             config_registry::ConfiguredInstanceRegistry,
             incident_repository::MongoIncidentRepository,
+            journal_reader::SystemJournalReader,
             lifecycle_event_dispatcher::LifecycleEventDispatcher,
             lifecycle_operation_repository::MongoLifecycleOperationRepository,
             lifecycle_operation_support::{
@@ -311,7 +313,14 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         instance_registry.as_ref(),
     ));
     let registry_port: Arc<dyn InstanceRegistry> = instance_registry.clone();
-    let incident_repository: Arc<dyn IncidentRepository> = incidents;
+    let incident_repository: Arc<dyn IncidentRepository> = incidents.clone();
+    let incident_checkpoints: Arc<dyn IncidentCheckpointRepository> = incidents;
+    let journal_reader: Arc<dyn JournalReader> = Arc::new(SystemJournalReader);
+    let incident_replay: Arc<dyn IncidentReplay> = Arc::new(JournalReplayService::new(
+        journal_reader,
+        incident_repository.clone(),
+        incident_checkpoints,
+    ));
     let incident_operations: Arc<dyn IncidentOperationLookup> = lifecycle_operations.clone();
     let incident_observation: Arc<dyn IncidentObservation> =
         Arc::new(IncidentObservationService::new(
@@ -521,6 +530,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         worker
             .with_event_delivery(lifecycle_event_delivery)
             .with_incident_observation(incident_observation)
+            .with_journal_replay(incident_replay)
     });
     let get_user_service = GetUserService::new(user_profiles);
     let session_issuer = AuthenticatedSessionIssuer::new(

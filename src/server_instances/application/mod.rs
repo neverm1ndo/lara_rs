@@ -1,5 +1,6 @@
 pub mod incident_service;
 pub mod incidents;
+pub mod journal_replay;
 pub mod lifecycle_events;
 pub mod lifecycle_operations;
 pub mod lifecycle_reconciliation;
