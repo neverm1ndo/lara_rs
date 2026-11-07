@@ -4,7 +4,8 @@
 - Дата: 2026-11-07
 - Связанные решения: [ADR-0001](0001-server-instance-control-plane.md),
   [ADR-0002](0002-release-b-lifecycle-and-cli.md),
-  [ADR-0003](0003-release-c-multi-instance-configuration.md)
+  [ADR-0003](0003-release-c-multi-instance-configuration.md),
+  [ADR-0005](0005-primary-uds-readiness-contract.md)
 
 ## Контекст
 
@@ -40,8 +41,9 @@ Release E посвящён надёжности наблюдения за **syst
 6. Диагностика `lara doctor`, OpenAPI, тесты восстановления и Linux smoke.
 
 UDS handshake и readiness primary требуют согласованного протокола с
-разработчиками игрового плагина. Они планируются отдельным шагом после
-согласования протокола и готовности плагина. Release E не требует переводить
+разработчиками игрового плагина. В Release E входит проект контракта в
+[ADR-0005](0005-primary-uds-readiness-contract.md); реализация и пилот ждут
+согласования и готовности плагина. Release E не требует переводить
 primary на systemd и не делает вывод о причине падения primary из отсутствия
 UDS-соединения. До появления источника process evidence для external primary
 автоматические инциденты по нему не создаются.
@@ -187,11 +189,20 @@ capability manifest служит навигации.
    тестового auxiliary, остановку Lara во время отказа, повторный replay,
    потерю D-Bus, rotation и недоступность журнала. Проверить отсутствие
    ложного incident при штатном restart, разграничение ролей и пакетный
-   smoke/rollback. Только после этого переводить ADR в `Accepted`.
+   smoke/rollback.
 
-После этого отдельно согласовать UDS handshake, heartbeat, таймауты и связь
-с `InvocationID` с командой игрового плагина. Пилот primary и его перевод на
-systemd требуют самостоятельного deployment окна.
+10. **Проект UDS-контракта.** Подготовить ADR для handshake, heartbeat,
+    идентичности сеанса и процесса, timeout, границы readiness и incident,
+    доступа к socket и режима external primary. Сверить его с командой
+    игрового плагина. Результат Release E — согласуемый проект
+    [ADR-0005](0005-primary-uds-readiness-contract.md), без реализации
+    транспорта. После пилота шага 9 и review контракта можно перевести
+    ADR-0004 в `Accepted`; ADR-0005 остаётся `Proposed` до согласования
+    обеими командами.
+
+После этого реализовывать согласованный UDS-контракт вместе с игровым
+плагином. Пилот primary и его перевод на systemd требуют самостоятельного
+deployment окна.
 
 ## Критерии приёмки
 
