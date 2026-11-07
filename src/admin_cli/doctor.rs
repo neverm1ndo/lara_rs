@@ -1,6 +1,9 @@
 use std::{path::Path, time::Duration};
 
-use mongodb::{Client, bson::doc};
+use mongodb::{
+    Client,
+    bson::{Document, doc},
+};
 use sea_orm::{ConnectionTrait, Database};
 use serde::Serialize;
 use thiserror::Error;
@@ -15,9 +18,15 @@ use super::{
 use crate::{
     cli::{DoctorArgs, InstanceConfigArgs, InstanceVerifyArgs},
     server_instances::{
-        application::registry::InstanceRegistry,
-        domain::{InstanceCapability, InstanceKind, InstanceManagement},
-        infrastructure::config_registry::ConfiguredInstanceRegistry,
+        application::{
+            incidents::IncidentCheckpointRepository, journal_replay::JournalReader,
+            registry::InstanceRegistry,
+        },
+        domain::{InstanceCapability, InstanceKind, InstanceManagement, ServerInstanceId},
+        infrastructure::{
+            config_registry::ConfiguredInstanceRegistry,
+            incident_repository::MongoIncidentRepository, journal_reader::SystemJournalReader,
+        },
     },
     shared::config::AppConfig,
 };
@@ -157,6 +166,7 @@ pub async fn execute(args: DoctorArgs) -> Result<(), DoctorError> {
     }
 
     let mut process_targets = Vec::new();
+    let mut incident_targets = Vec::new();
     for instance in selected {
         if instance.kind() != InstanceKind::Auxiliary
             || instance.management() != InstanceManagement::Systemd
@@ -178,6 +188,12 @@ pub async fn execute(args: DoctorArgs) -> Result<(), DoctorError> {
             .as_str()
             .to_owned();
         process_targets.push((instance.id().to_string(), unit, executable));
+        if instance.observability().incident_tracking() {
+            incident_targets.push((
+                instance.id().clone(),
+                configured.systemd_unit().unwrap().as_str().to_owned(),
+            ));
+        }
         let verify_args = InstanceVerifyArgs {
             id: instance.id().to_string(),
             executable: None,
@@ -225,6 +241,21 @@ pub async fn execute(args: DoctorArgs) -> Result<(), DoctorError> {
         }
     }
     checks.push(check_process_ownership(&process_targets));
+    if !incident_targets.is_empty() {
+        checks.push(check_journal_service_access());
+        for (instance_id, unit) in incident_targets {
+            checks.extend(
+                check_incident_replay(
+                    config.mongodb.uri.expose_secret(),
+                    &config.mongodb.database,
+                    timeout,
+                    &instance_id,
+                    &unit,
+                )
+                .await,
+            );
+        }
+    }
     checks.push(DoctorCheck::warning(
         "polkit.effective",
         "static least-privilege rule is checked, but authorization for the lara process requires a Linux integration test",
@@ -284,6 +315,216 @@ async fn check_mongo(uri: &str, database: &str, timeout: Duration) -> DoctorChec
             "MongoDB ping timed out",
             Some(format!("timeout={}s", timeout.as_secs())),
         ),
+    }
+}
+
+async fn check_incident_replay(
+    uri: &str,
+    database: &str,
+    timeout: Duration,
+    instance_id: &ServerInstanceId,
+    unit: &str,
+) -> Vec<DoctorCheck> {
+    let prefix = format!("instance.{instance_id}.journal");
+    let stored = tokio::time::timeout(timeout, async {
+        let client = Client::with_uri_str(uri)
+            .await
+            .map_err(|error| error.to_string())?;
+        let database = client.database(database);
+        let repository = MongoIncidentRepository::new(database.clone());
+        let checkpoint = repository
+            .by_instance(instance_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        let gap = database
+            .collection::<Document>("server_instance_incident_gaps")
+            .find_one(doc! { "instance_id": instance_id.as_str() })
+            .sort(doc! { "detected_at": -1, "_id": -1 })
+            .await
+            .map_err(|error| error.to_string())?;
+        Ok::<_, String>((checkpoint, gap))
+    })
+    .await;
+    let (checkpoint, gap) = match stored {
+        Ok(Ok(stored)) => stored,
+        Ok(Err(_)) => {
+            return vec![DoctorCheck::failed(
+                format!("{prefix}.replay"),
+                "journal replay metadata could not be read",
+                Some("MongoDB query failed; connection details are redacted".into()),
+            )];
+        }
+        Err(_) => {
+            return vec![DoctorCheck::failed(
+                format!("{prefix}.replay"),
+                "journal replay metadata query timed out",
+                Some(format!("timeout={}s", timeout.as_secs())),
+            )];
+        }
+    };
+    let mut checks = Vec::new();
+    checks.push(match checkpoint.as_ref() {
+        Some(value) => DoctorCheck::passed(
+            format!("{prefix}.checkpoint"),
+            "durable replay checkpoint exists",
+            Some(format!(
+                "bootId={}, version={}",
+                value.boot_id, value.version
+            )),
+        ),
+        None => DoctorCheck::warning(
+            format!("{prefix}.checkpoint"),
+            "no replay checkpoint yet; this can be normal before the first matching journal entry",
+            None,
+        ),
+    });
+    checks.push(match gap {
+        Some(gap) => DoctorCheck::warning(
+            format!("{prefix}.gap"),
+            "historical journal gap requires operator review",
+            Some(format!(
+                "reason={}, detectedAt={}; inspect server_instance_incident_gaps",
+                gap.get_str("reason").unwrap_or("unknown"),
+                gap.get_datetime("detected_at")
+                    .map_or("unknown".to_owned(), |value| value.to_string()),
+            )),
+        ),
+        None => DoctorCheck::passed(
+            format!("{prefix}.gap"),
+            "no journal gap is recorded for this instance",
+            None,
+        ),
+    });
+    let journal = tokio::time::timeout(
+        timeout,
+        SystemJournalReader.read(unit, checkpoint.as_ref(), 0),
+    )
+    .await;
+    checks.push(match journal {
+        Ok(Ok(page)) if !page.persistent => DoctorCheck::failed(
+            format!("{prefix}.replay"),
+            "persistent journald files are unavailable to this caller",
+            None,
+        ),
+        Ok(Ok(page)) if !page.cursor_found => DoctorCheck::failed(
+            format!("{prefix}.replay"),
+            "stored replay cursor is no longer present in journald",
+            Some("an unknown interval may require manual incident review".into()),
+        ),
+        Ok(Ok(_)) => DoctorCheck::passed(
+            format!("{prefix}.replay"),
+            "persistent journal is readable and replay cursor is available",
+            Some(
+                "journal was opened by the doctor process; service access is checked separately"
+                    .into(),
+            ),
+        ),
+        Ok(Err(error)) => DoctorCheck::failed(
+            format!("{prefix}.replay"),
+            "journal read failed",
+            Some(error),
+        ),
+        Err(_) => DoctorCheck::failed(
+            format!("{prefix}.replay"),
+            "journal probe timed out",
+            Some(format!("timeout={}s", timeout.as_secs())),
+        ),
+    });
+    checks
+}
+
+fn check_journal_service_access() -> DoctorCheck {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(journal_gid) = super::instance::local_group_id("systemd-journal") else {
+            return DoctorCheck::failed(
+                "journal.service-access",
+                "systemd-journal group is unavailable",
+                None,
+            );
+        };
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return DoctorCheck::failed(
+                "journal.service-access",
+                "process table could not be inspected",
+                None,
+            );
+        };
+        let Ok(expected) = std::fs::canonicalize("/usr/bin/lara") else {
+            return DoctorCheck::warning(
+                "journal.service-access",
+                "installed Lara executable was not found; service journal group cannot be verified",
+                None,
+            );
+        };
+        for entry in entries.flatten() {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .bytes()
+                .all(|byte| byte.is_ascii_digit())
+            {
+                continue;
+            }
+            let path = entry.path();
+            if std::fs::read_link(path.join("exe")).ok().as_ref() != Some(&expected) {
+                continue;
+            }
+            let Ok(command) = std::fs::read(path.join("cmdline")) else {
+                continue;
+            };
+            if !command
+                .split(|byte| *byte == 0)
+                .any(|part| part == b"serve")
+            {
+                continue;
+            }
+            if !std::fs::read_to_string(path.join("cgroup"))
+                .is_ok_and(|cgroup| cgroup.contains("lara-rs.service"))
+            {
+                continue;
+            }
+            let Ok(status) = std::fs::read_to_string(path.join("status")) else {
+                continue;
+            };
+            let groups = status.lines().find_map(|line| line.strip_prefix("Groups:"));
+            return match groups {
+                Some(groups)
+                    if groups
+                        .split_whitespace()
+                        .any(|value| value.parse::<u32>() == Ok(journal_gid)) =>
+                {
+                    DoctorCheck::passed(
+                        "journal.service-access",
+                        "running Lara process has systemd-journal supplementary group",
+                        None,
+                    )
+                }
+                Some(_) => DoctorCheck::failed(
+                    "journal.service-access",
+                    "running Lara process lacks systemd-journal supplementary group",
+                    None,
+                ),
+                None => DoctorCheck::failed(
+                    "journal.service-access",
+                    "running Lara process group list is unavailable",
+                    None,
+                ),
+            };
+        }
+        DoctorCheck::warning(
+            "journal.service-access",
+            "running Lara service was not found; effective journal group cannot be verified",
+            None,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        DoctorCheck::warning(
+            "journal.service-access",
+            "Linux service journal access cannot be checked on this platform",
+            None,
+        )
     }
 }
 
