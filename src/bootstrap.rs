@@ -86,7 +86,10 @@ use crate::{
             incident_service::{
                 IncidentObservation, IncidentObservationService, IncidentOperationLookup,
             },
-            incidents::{IncidentCheckpointRepository, IncidentRepository},
+            incidents::{
+                IncidentCheckpointRepository, IncidentEventDelivery, IncidentOutbox,
+                IncidentRepository,
+            },
             journal_replay::{IncidentReplay, JournalReader, JournalReplayService},
             lifecycle_events::{LifecycleEventDelivery, LifecycleEventOutbox},
             lifecycle_reconciliation::LifecycleReconciler,
@@ -97,6 +100,7 @@ use crate::{
         domain::InstanceCapability,
         infrastructure::{
             config_registry::ConfiguredInstanceRegistry,
+            incident_event_dispatcher::IncidentEventDispatcher,
             incident_repository::MongoIncidentRepository,
             journal_reader::SystemJournalReader,
             lifecycle_event_dispatcher::LifecycleEventDispatcher,
@@ -139,6 +143,9 @@ const LIFECYCLE_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(1);
 const LIFECYCLE_EVENT_INTERVAL: Duration = Duration::from_millis(250);
 const LIFECYCLE_EVENT_LEASE: Duration = Duration::from_secs(30);
 const LIFECYCLE_EVENT_BATCH_SIZE: usize = 100;
+const INCIDENT_EVENT_INTERVAL: Duration = Duration::from_millis(250);
+const INCIDENT_EVENT_LEASE: Duration = Duration::from_secs(30);
+const INCIDENT_EVENT_BATCH_SIZE: usize = 100;
 
 pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let bind_address = config.server.bind_address;
@@ -149,6 +156,11 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let lifecycle_events = tokio::spawn(
         application
             .lifecycle_event_dispatcher
+            .run(shutdown_rx.clone()),
+    );
+    let incident_events = tokio::spawn(
+        application
+            .incident_event_dispatcher
             .run(shutdown_rx.clone()),
     );
     let configuration_events = tokio::spawn(
@@ -170,6 +182,7 @@ pub async fn run(config: AppConfig) -> Result<(), BootstrapError> {
     let _ = shutdown_tx.send(true);
     maintenance.await?;
     lifecycle_events.await?;
+    incident_events.await?;
     configuration_events.await?;
     if let Some(observer) = systemd_observer {
         observer.await?;
@@ -187,6 +200,7 @@ struct BuiltApplication {
     systemd_observer: Option<SystemdObserverWorker>,
     lifecycle_reconciliation: Option<LifecycleReconciliationWorker>,
     lifecycle_event_dispatcher: LifecycleEventDispatcher,
+    incident_event_dispatcher: IncidentEventDispatcher,
     configuration_event_dispatcher: ConfigurationEventDispatcher,
 }
 
@@ -315,6 +329,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     ));
     let registry_port: Arc<dyn InstanceRegistry> = instance_registry.clone();
     let incident_repository: Arc<dyn IncidentRepository> = incidents.clone();
+    let incident_outbox: Arc<dyn IncidentOutbox> = incidents.clone();
     let incident_management_store: Arc<dyn IncidentManagementStore> = incidents.clone();
     let incident_management_service = Arc::new(IncidentManagementService::new(
         registry_port.clone(),
@@ -524,6 +539,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     );
     let configuration_event_dispatcher =
         ConfigurationEventDispatcher::new(mutation_log_port, configuration_delivery);
+    let incident_delivery: Arc<dyn IncidentEventDelivery> = socket_delivery.clone();
     let lifecycle_event_delivery: Arc<dyn LifecycleEventDelivery> = socket_delivery;
     let lifecycle_event_dispatcher = LifecycleEventDispatcher::new(
         lifecycle_event_outbox,
@@ -531,6 +547,13 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         LIFECYCLE_EVENT_INTERVAL,
         LIFECYCLE_EVENT_LEASE,
         LIFECYCLE_EVENT_BATCH_SIZE,
+    )?;
+    let incident_event_dispatcher = IncidentEventDispatcher::new(
+        incident_outbox,
+        incident_delivery,
+        INCIDENT_EVENT_INTERVAL,
+        INCIDENT_EVENT_LEASE,
+        INCIDENT_EVENT_BATCH_SIZE,
     )?;
     let systemd_observer = systemd_observer.map(|worker| {
         worker
@@ -616,6 +639,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         systemd_observer,
         lifecycle_reconciliation,
         lifecycle_event_dispatcher,
+        incident_event_dispatcher,
         configuration_event_dispatcher,
     })
 }

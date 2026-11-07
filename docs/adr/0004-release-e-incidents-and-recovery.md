@@ -170,6 +170,11 @@ capability manifest служит навигации.
    роль в серверной проекции; при необходимости подавлять toast инициатору
    review по actor ID, сохраняя state update для всех его вкладок. Результат:
    временный отказ Socket.IO не теряет историю и не раскрывает auxiliary.
+   Dispatcher подключён к встроенному MongoDB outbox и отправляет
+   `server_instance.incident.updated.v1` только в Developer room. Подтверждение
+   outbox выполняется после успешной отправки; повтор сохраняет `eventId`.
+   `actorUserId` позволяет клиенту подавить собственный toast, не теряя
+   state update в других вкладках.
 
 8. **Эксплуатация.** Добавить в `lara doctor` read-only проверки persistent
    journal, прав сервисной учётной записи, checkpoint и состояния replay.

@@ -2,8 +2,8 @@
 
 Статус: `Proposed`. Этот документ фиксирует контракт
 [ADR-0004](../adr/0004-release-e-incidents-and-recovery.md). HTTP-маршруты
-шага 6 смонтированы и входят в runtime `/openapi.json`; Socket.IO событие
-остаётся для шага 7.
+шага 6 смонтированы и входят в runtime `/openapi.json`; событие Socket.IO
+шага 7 теперь доставляется из durable outbox.
 
 ## Инвентаризация действующего кода
 
@@ -175,7 +175,7 @@ cursor или служебный unit.
 
 ## Realtime и восстановление
 
-Предлагаемое событие Socket.IO `/`: `server_instance.incident.updated.v1`.
+Событие Socket.IO `/`: `server_instance.incident.updated.v1`.
 Конверт содержит `schemaVersion`, `eventId`, `incidentId`, `instanceId`,
 `version`, `occurredAt`, `kind`, `operationalState`, `reviewState`,
 `openedAt`, `recoveredAt` и `actorUserId` для ручного review. Event ID
@@ -186,6 +186,14 @@ cursor или служебный unit.
 События адресуются только Developer. Инициатор review получает обновление
 состояния во всех своих вкладках; клиент подавляет собственный toast по
 `actorUserId`. У автоматического инцидента actor отсутствует.
+
+Dispatcher опрашивает встроенный в документ MongoDB outbox с арендой записи.
+При ошибке отправки запись остаётся и возвращается в обработку после истечения
+аренды. Подтверждение удаляет запись outbox только после успешной отправки;
+повторное событие имеет прежний `eventId`. Соединение Socket.IO не заменяет
+HTTP: после переподключения клиент получает актуальные инциденты через
+`GET /server-instances/{instance_id}/incidents` и дедуплицирует realtime
+по `eventId`. В событие не входят unit, journal cursor и сырые логи.
 
 ## Открытые решения перед шагом 2
 

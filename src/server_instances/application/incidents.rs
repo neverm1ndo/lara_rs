@@ -97,6 +97,25 @@ pub trait IncidentOutbox: Send + Sync {
     fn acknowledge<'a>(&'a self, claim: &'a ClaimedIncidentEvent) -> IncidentStoreFuture<'a, ()>;
 }
 
+pub const INCIDENT_UPDATED_EVENT: &str = "server_instance.incident.updated.v1";
+
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[error("incident event delivery failed: {0}")]
+pub struct IncidentEventDeliveryError(String);
+
+impl IncidentEventDeliveryError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self(message.into())
+    }
+}
+
+pub type IncidentDeliveryFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), IncidentEventDeliveryError>> + Send + 'a>>;
+
+pub trait IncidentEventDelivery: Send + Sync {
+    fn deliver<'a>(&'a self, event: &'a IncidentOutboxEvent) -> IncidentDeliveryFuture<'a>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JournalCheckpoint {
     pub instance_id: ServerInstanceId,

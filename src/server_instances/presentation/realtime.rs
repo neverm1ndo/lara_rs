@@ -11,6 +11,10 @@ use crate::{
     auth::application::authenticate_jwt::AuthenticateBearerToken,
     server_instances::{
         application::{
+            incidents::{
+                INCIDENT_UPDATED_EVENT, IncidentDeliveryFuture, IncidentEventDelivery,
+                IncidentEventDeliveryError, IncidentOutboxEvent,
+            },
             lifecycle_events::{
                 LifecycleEventDelivery, LifecycleEventDeliveryError, LifecycleEventDeliveryFuture,
                 LifecycleOperationUpdatedEvent, OPERATION_UPDATED_EVENT, STATE_CHANGED_EVENT,
@@ -18,7 +22,9 @@ use crate::{
             },
             runtime_state::RuntimeStateView,
         },
-        domain::LifecycleOperationState,
+        domain::{
+            IncidentKind, IncidentOperationalState, IncidentReviewState, LifecycleOperationState,
+        },
         presentation::dto::{
             LifecycleActionResponse, LifecycleFailureCodeResponse,
             LifecycleOperationStatusResponse, RuntimeStateResponse,
@@ -111,6 +117,54 @@ impl LifecycleEventDelivery for SocketLifecycleEventDelivery {
                     .map_err(delivery_error),
             }
         })
+    }
+}
+
+impl IncidentEventDelivery for SocketLifecycleEventDelivery {
+    fn deliver<'a>(&'a self, event: &'a IncidentOutboxEvent) -> IncidentDeliveryFuture<'a> {
+        Box::pin(async move {
+            self.io
+                .to(DEVELOPERS_ROOM)
+                .emit(INCIDENT_UPDATED_EVENT, &IncidentEventResponse::from(event))
+                .await
+                .map_err(|error| IncidentEventDeliveryError::new(error.to_string()))
+        })
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IncidentEventResponse {
+    schema_version: u16,
+    event_id: String,
+    incident_id: String,
+    instance_id: String,
+    version: u64,
+    occurred_at: String,
+    kind: IncidentKind,
+    operational_state: IncidentOperationalState,
+    review_state: IncidentReviewState,
+    opened_at: String,
+    recovered_at: Option<String>,
+    actor_user_id: Option<i64>,
+}
+
+impl From<&IncidentOutboxEvent> for IncidentEventResponse {
+    fn from(event: &IncidentOutboxEvent) -> Self {
+        Self {
+            schema_version: 1,
+            event_id: event.event_id.clone(),
+            incident_id: event.incident_id.to_string(),
+            instance_id: event.instance_id.to_string(),
+            version: event.version,
+            occurred_at: event.occurred_at.to_rfc3339(),
+            kind: event.kind,
+            operational_state: event.operational_state,
+            review_state: event.review_state,
+            opened_at: event.opened_at.to_rfc3339(),
+            recovered_at: event.recovered_at.map(|at| at.to_rfc3339()),
+            actor_user_id: event.actor_user_id,
+        }
     }
 }
 
@@ -256,5 +310,41 @@ mod tests {
             realtime_audience(UserRole::Mapper, &[UserRole::Mapper]),
             None
         );
+    }
+
+    #[test]
+    fn incident_event_contains_recovery_identity_without_internal_evidence() {
+        let at = Utc::now();
+        let incident_id = crate::server_instances::domain::IncidentId::new();
+        let event = IncidentOutboxEvent {
+            event_id: format!("incident:{incident_id}:2"),
+            incident_id,
+            instance_id: ServerInstanceId::new("dev-dm").unwrap(),
+            version: 2,
+            occurred_at: at,
+            kind: IncidentKind::Outage,
+            operational_state: IncidentOperationalState::Resolved,
+            review_state: IncidentReviewState::Acknowledged,
+            opened_at: at - chrono::Duration::seconds(5),
+            recovered_at: Some(at),
+            actor_user_id: Some(42),
+        };
+        let value = serde_json::to_value(IncidentEventResponse::from(&event)).unwrap();
+        assert_eq!(value["schemaVersion"], 1);
+        assert_eq!(value["eventId"], event.event_id);
+        assert_eq!(value["incidentId"], incident_id.to_string());
+        assert_eq!(value["instanceId"], "dev-dm");
+        assert_eq!(value["version"], 2);
+        assert_eq!(value["kind"], "outage");
+        assert_eq!(value["operationalState"], "resolved");
+        assert_eq!(value["reviewState"], "acknowledged");
+        assert_eq!(value["actorUserId"], 42);
+        assert!(value.get("unitName").is_none());
+        assert!(value.get("cursor").is_none());
+        assert_eq!(
+            realtime_audience(UserRole::Admin, &[UserRole::Admin]),
+            Some(RealtimeAudience::PrimaryGeneral)
+        );
+        assert_ne!(DEVELOPERS_ROOM, PRIMARY_GENERAL_ROOM);
     }
 }

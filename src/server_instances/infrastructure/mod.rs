@@ -1,4 +1,5 @@
 pub mod config_registry;
+pub mod incident_event_dispatcher;
 pub mod incident_operation_lookup;
 pub mod incident_repository;
 pub mod journal_reader;
