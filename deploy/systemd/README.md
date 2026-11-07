@@ -37,7 +37,7 @@ lara completions bash | sudo tee /usr/share/bash-completion/completions/lara >/d
 пишет скрипт в stdout и не читает production-конфигурацию.
 
 ```sh
-sudo apt install ./lara-rs_0.2.4-1_amd64.deb
+sudo apt install ./lara-rs_0.2.5-1_amd64.deb
 
 sudo lara config init --dry-run
 sudo lara config init
