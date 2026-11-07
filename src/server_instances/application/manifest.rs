@@ -168,6 +168,13 @@ fn project_instance(
         .capabilities()
         .iter()
         .filter_map(|capability| {
+            if capability == InstanceCapability::Incidents
+                && (!developer
+                    || instance.management() != InstanceManagement::Systemd
+                    || !instance.observability().incident_tracking())
+            {
+                return None;
+            }
             permissions_for(capability, subject, developer, instance.management())
                 .map(|access| (feature_id(capability), access))
         })
@@ -185,9 +192,12 @@ fn project_instance(
         observability: ManifestObservability {
             process_monitoring: instance.management() == InstanceManagement::Systemd,
             readiness: observability.readiness(),
-            // The registry flag is rollout intent. No incident journal is
-            // mounted yet, so the effective manifest must not advertise it.
-            incident_tracking: false,
+            incident_tracking: developer
+                && instance.management() == InstanceManagement::Systemd
+                && instance
+                    .capabilities()
+                    .contains(InstanceCapability::Incidents)
+                && observability.incident_tracking(),
         },
     }
 }
@@ -229,8 +239,9 @@ fn permissions_for(
         InstanceCapability::Backups if developer || subject.has_role(UserRole::Backuper) => {
             vec![FeaturePermission::Read, FeaturePermission::Restore]
         }
-        // Activate this capability alongside the Release E incident API.
-        InstanceCapability::Incidents => return None,
+        InstanceCapability::Incidents if developer => {
+            vec![FeaturePermission::Read, FeaturePermission::Acknowledge]
+        }
         _ => return None,
     };
 
@@ -355,13 +366,12 @@ mod tests {
 
         assert_eq!(manifest.instances.len(), 2);
         assert_eq!(manifest.instances[1].id.as_str(), "dev-dm");
-        assert_eq!(manifest.instances[1].features.len(), 3);
-        assert!(!manifest.instances[1].observability.incident_tracking);
+        assert_eq!(manifest.instances[1].features.len(), 4);
+        assert!(manifest.instances[1].observability.incident_tracking);
         assert!(!manifest.instances[0].observability.incident_tracking);
-        assert!(
-            !manifest.instances[1]
-                .features
-                .contains_key(&FeatureId::Incidents)
+        assert_eq!(
+            manifest.instances[1].features[&FeatureId::Incidents].permissions,
+            [FeaturePermission::Read, FeaturePermission::Acknowledge]
         );
         assert_eq!(
             manifest.instances[1].features[&FeatureId::Lifecycle].permissions,

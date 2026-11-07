@@ -13,6 +13,11 @@ use super::dto::{
     RuntimeReadinessResponse, RuntimeStateResponse, ServerInstanceErrorResponse,
     TerminationEvidenceResponse, TerminationKindResponse,
 };
+use super::incident_dto::{
+    ChangeIncidentReviewRequest, ChangeIncidentReviewResponse, IncidentErrorResponse,
+    IncidentEvidenceResponse, IncidentListResponse, IncidentResponse, IncidentReviewEntryResponse,
+    ReviewStateRequest,
+};
 
 const BEARER_AUTH_SCHEME: &str = "bearerAuth";
 
@@ -48,6 +53,14 @@ const BEARER_AUTH_SCHEME: &str = "bearerAuth";
         LifecycleFailureCodeResponse,
         LifecycleEvidenceResponse,
         ServerInstanceErrorResponse
+        ,IncidentListResponse,
+        IncidentResponse,
+        IncidentEvidenceResponse,
+        IncidentReviewEntryResponse,
+        ChangeIncidentReviewRequest,
+        ReviewStateRequest,
+        ChangeIncidentReviewResponse,
+        IncidentErrorResponse
     )),
     modifiers(&BearerSecurity),
     tags((
@@ -93,6 +106,7 @@ mod tests {
         },
         server_instances::{
             application::{
+                incident_management::IncidentManagementService,
                 lifecycle_service::LifecycleOperationService, registry::InstanceRegistry,
                 runtime_state::RuntimeStateReader,
             },
@@ -119,6 +133,9 @@ mod tests {
         }
 
         fn lifecycle_operation_service(&self) -> Arc<LifecycleOperationService> {
+            panic!("documentation generation does not resolve application services")
+        }
+        fn incident_management_service(&self) -> Arc<IncidentManagementService> {
             panic!("documentation generation does not resolve application services")
         }
     }
@@ -152,5 +169,11 @@ mod tests {
                 .is_object()
         );
         assert!(specification["components"]["schemas"]["LifecycleOperationResponse"].is_object());
+        assert!(
+            specification["paths"]["/server-instances/{instance_id}/incidents"]["get"].is_object()
+        );
+        assert!(specification["paths"]["/server-instances/{instance_id}/incidents/{incident_id}"]["get"].is_object());
+        assert!(specification["paths"]["/server-instances/{instance_id}/incidents/{incident_id}/review"]["patch"].is_object());
+        assert!(specification["components"]["schemas"]["IncidentResponse"].is_object());
     }
 }

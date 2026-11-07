@@ -1,8 +1,9 @@
 # Release E: контракт инцидентов (проект)
 
-Статус: `Proposed`. Этот документ фиксирует первый шаг
-[ADR-0004](../adr/0004-release-e-incidents-and-recovery.md). Маршруты и события
-ниже ещё не смонтированы; runtime `/openapi.json` пока их не содержит.
+Статус: `Proposed`. Этот документ фиксирует контракт
+[ADR-0004](../adr/0004-release-e-incidents-and-recovery.md). HTTP-маршруты
+шага 6 смонтированы и входят в runtime `/openapi.json`; Socket.IO событие
+остаётся для шага 7.
 
 ## Инвентаризация действующего кода
 
@@ -131,7 +132,7 @@ Operational state: `open -> recovering -> resolved`; при кратком от�
 самостоятельный отказ, он классифицируется отдельно с явной ссылкой на
 операцию и уровнем уверенности.
 
-## Предлагаемый HTTP API
+## HTTP API
 
 Все пути находятся под `/server-instances/{instance_id}/incidents`.
 
@@ -148,6 +149,18 @@ Operational state: `open -> recovering -> resolved`; при кратком от�
 запроса с тем же actor, ключом и телом возвращает прежний результат; тот же
 ключ с другим содержимым даёт конфликт. Ответы содержат `Cache-Control:
 no-store`.
+
+Реализация списка использует `limit` 1–100 (по умолчанию 50), фильтры
+`operationalState`, `reviewState`, `openedFrom`, `openedTo` и `cursor`.
+`nextCursor` кодирует instance ID, набор фильтров и позицию
+`(openedAt milliseconds, incidentId)`; неверный или чужой cursor даёт 400.
+Детали возвращают strong `ETag: "<version>"`. PATCH принимает JSON
+`{"reviewState":"acknowledged","note":"..."}` (или `investigated`) и возвращает
+версию, состояние и запись review. Идемпотентный ключ ограничен одним
+инцидентом и actor; отпечаток включает исходный `If-Match`, целевое состояние
+и note. Запись ключа, результата, review history и outbox выполняется одним
+условным обновлением MongoDB. Подробные ответы не содержат сырой journal
+cursor или служебный unit.
 
 | HTTP | Код | Случай |
 | ---: | --- | --- |

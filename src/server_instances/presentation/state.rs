@@ -5,6 +5,7 @@ use axum::{extract::FromRequestParts, http::request::Parts};
 use crate::{
     auth::presentation::extractors::JwtExtractorState,
     server_instances::application::{
+        incident_management::IncidentManagementService,
         lifecycle_service::LifecycleOperationService,
         manifest::InstanceManifestService,
         registry::InstanceRegistry,
@@ -16,6 +17,19 @@ pub trait ServerInstancesState: JwtExtractorState {
     fn instance_registry(&self) -> Arc<dyn InstanceRegistry>;
     fn runtime_state_reader(&self) -> Arc<dyn RuntimeStateReader>;
     fn lifecycle_operation_service(&self) -> Arc<LifecycleOperationService>;
+    fn incident_management_service(&self) -> Arc<IncidentManagementService>;
+}
+
+pub struct IncidentManagementHandle(pub Arc<IncidentManagementService>);
+
+impl<S> FromRequestParts<S> for IncidentManagementHandle
+where
+    S: ServerInstancesState,
+{
+    type Rejection = Infallible;
+    async fn from_request_parts(_parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        Ok(Self(state.incident_management_service()))
+    }
 }
 
 pub struct LifecycleOperationHandle(pub Arc<LifecycleOperationService>);

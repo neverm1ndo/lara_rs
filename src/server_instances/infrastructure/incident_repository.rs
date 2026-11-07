@@ -10,6 +10,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::server_instances::{
+    application::incident_management::{
+        IncidentFilters, IncidentListCursor, IncidentManagementStore, ManagementFuture,
+        ReviewReplay, ReviewResult,
+    },
     application::incidents::{
         ClaimedIncidentEvent, IncidentCheckpointRepository, IncidentOutbox, IncidentOutboxEvent,
         IncidentRepository, IncidentStoreError, IncidentStoreFuture, JournalCheckpoint, JournalGap,
@@ -220,6 +224,7 @@ impl IncidentRepository for MongoIncidentRepository {
                 bson::to_document(&canonical).map_err(|error| invalid(error.to_string()))?;
             fields.remove("_id");
             fields.remove("outbox");
+            fields.remove("review_requests");
             let active = fields.contains_key("active_instance_id");
             let mut update = doc! { "$set": fields, "$push": { "outbox": event } };
             if !active {
@@ -239,6 +244,141 @@ impl IncidentRepository for MongoIncidentRepository {
                 }
                 Err(error) => Err(db_error(error)),
             }
+        })
+    }
+}
+
+impl IncidentManagementStore for MongoIncidentRepository {
+    fn list<'a>(
+        &'a self,
+        instance: &'a ServerInstanceId,
+        filters: &'a IncidentFilters,
+        cursor: Option<&'a IncidentListCursor>,
+        limit: usize,
+    ) -> ManagementFuture<'a, Vec<Incident>> {
+        Box::pin(async move {
+            let mut filter = doc! { "instance_id": instance.as_str() };
+            if let Some(state) = filters.operational_state {
+                filter.insert(
+                    "operational_state",
+                    bson::to_bson(&state).map_err(|error| invalid(error.to_string()))?,
+                );
+            }
+            if let Some(state) = filters.review_state {
+                filter.insert(
+                    "review_state",
+                    bson::to_bson(&state).map_err(|error| invalid(error.to_string()))?,
+                );
+            }
+            let mut opened = bson::Document::new();
+            if let Some(from) = filters.opened_from {
+                opened.insert("$gte", bson_time(from));
+            }
+            if let Some(to) = filters.opened_to {
+                opened.insert("$lte", bson_time(to));
+            }
+            if !opened.is_empty() {
+                filter.insert("opened_at_sort", opened);
+            }
+            if let Some(cursor) = cursor {
+                let at = BsonDateTime::from_millis(cursor.opened_at_millis);
+                filter.insert(
+                    "$or",
+                    vec![
+                        doc! { "opened_at_sort": { "$lt": at } },
+                        doc! { "opened_at_sort": at, "_id": { "$lt": &cursor.incident_id } },
+                    ],
+                );
+            }
+            let mut cursor = self
+                .incidents
+                .find(filter)
+                .sort(doc! { "opened_at_sort": -1, "_id": -1 })
+                .limit(i64::try_from(limit).map_err(|_| invalid("incident limit exceeds i64"))?)
+                .await
+                .map_err(db_error)?;
+            let mut items = Vec::new();
+            while cursor.advance().await.map_err(db_error)? {
+                items.push(Incident::try_from(
+                    cursor.deserialize_current().map_err(db_error)?,
+                )?);
+            }
+            Ok(items)
+        })
+    }
+
+    fn get<'a>(&'a self, id: IncidentId) -> ManagementFuture<'a, Option<Incident>> {
+        IncidentRepository::by_id(self, id)
+    }
+
+    fn by_review_key<'a>(
+        &'a self,
+        id: IncidentId,
+        actor: i64,
+        key: &'a str,
+    ) -> ManagementFuture<'a, Option<ReviewReplay>> {
+        Box::pin(async move {
+            let document = self.incidents.find_one(doc! { "_id": id.to_string(), "review_requests": { "$elemMatch": { "actor_user_id": actor, "key": key } } }).await.map_err(db_error)?;
+            document
+                .and_then(|document| {
+                    document
+                        .review_requests
+                        .into_iter()
+                        .find(|request| request.actor_user_id == actor && request.key == key)
+                })
+                .map(|value| {
+                    Ok(ReviewReplay {
+                        fingerprint: value.fingerprint,
+                        result: ReviewResult {
+                            incident_id: id,
+                            version: u64_value(value.result_version)?,
+                            state: value.result_state,
+                            actor_user_id: value.actor_user_id,
+                            note: value.result_note,
+                            updated_at: parse_time(&value.result_updated_at)?,
+                        },
+                    })
+                })
+                .transpose()
+        })
+    }
+
+    fn save_review<'a>(
+        &'a self,
+        incident: &'a Incident,
+        expected_version: u64,
+        actor: i64,
+        key: &'a str,
+        replay: &'a ReviewReplay,
+    ) -> ManagementFuture<'a, ()> {
+        Box::pin(async move {
+            if incident.version()
+                != expected_version
+                    .checked_add(1)
+                    .ok_or_else(|| invalid("review version overflow"))?
+            {
+                return Err(invalid("review version must advance by one"));
+            }
+            let canonical = IncidentDocument::try_from(incident)?;
+            let event = canonical
+                .outbox
+                .first()
+                .ok_or_else(|| invalid("missing review outbox event"))?;
+            let event = bson::to_bson(event).map_err(|error| invalid(error.to_string()))?;
+            let request = ReviewRequestDocument::from_replay(actor, key, replay)?;
+            let mut fields =
+                bson::to_document(&canonical).map_err(|error| invalid(error.to_string()))?;
+            fields.remove("_id");
+            fields.remove("outbox");
+            fields.remove("review_requests");
+            let result = self.incidents.update_one(
+                doc! { "_id": incident.id().to_string(), "version": i64_value(expected_version)? },
+                doc! { "$set": fields, "$push": { "outbox": event, "review_requests": bson::to_bson(&request).map_err(|error| invalid(error.to_string()))? } },
+            ).await.map_err(db_error)?;
+            if result.matched_count == 0 {
+                return Err(IncidentStoreError::ConcurrentModification);
+            }
+            Ok(())
         })
     }
 }
@@ -415,6 +555,37 @@ struct IncidentDocument {
     last_change_actor: Option<i64>,
     #[serde(default)]
     outbox: Vec<EventDocument>,
+    #[serde(default)]
+    review_requests: Vec<ReviewRequestDocument>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ReviewRequestDocument {
+    actor_user_id: i64,
+    key: String,
+    fingerprint: String,
+    result_version: i64,
+    result_state: IncidentReviewState,
+    result_note: String,
+    result_updated_at: String,
+}
+
+impl ReviewRequestDocument {
+    fn from_replay(
+        actor: i64,
+        key: &str,
+        replay: &ReviewReplay,
+    ) -> Result<Self, IncidentStoreError> {
+        Ok(Self {
+            actor_user_id: actor,
+            key: key.to_owned(),
+            fingerprint: replay.fingerprint.clone(),
+            result_version: i64_value(replay.result.version)?,
+            result_state: replay.result.state,
+            result_note: replay.result.note.clone(),
+            result_updated_at: replay.result.updated_at.to_rfc3339(),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -531,6 +702,7 @@ impl TryFrom<&Incident> for IncidentDocument {
                 .collect(),
             last_change_actor: incident.last_change_actor().map(|id| id.get()),
             outbox: vec![event],
+            review_requests: vec![],
         })
     }
 }
@@ -1058,6 +1230,85 @@ mod tests {
             IncidentCheckpointRepository::advance(&repository, &advanced, Some(0)).await,
             Err(IncidentStoreError::ConcurrentModification)
         );
+        let mut reviewed = next.clone();
+        let reviewed_at = Utc::now().max(reviewed.updated_at());
+        reviewed
+            .acknowledge(IncidentReviewerId::new(42).unwrap(), "Checked", reviewed_at)
+            .unwrap();
+        let replay = ReviewReplay {
+            fingerprint: "same-request".into(),
+            result: ReviewResult {
+                incident_id: reviewed.id(),
+                version: reviewed.version(),
+                state: reviewed.review_state(),
+                actor_user_id: 42,
+                note: "Checked".into(),
+                updated_at: reviewed_at,
+            },
+        };
+        IncidentManagementStore::save_review(
+            &repository,
+            &reviewed,
+            next.version(),
+            42,
+            "review-1",
+            &replay,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            IncidentManagementStore::by_review_key(&repository, reviewed.id(), 42, "review-1")
+                .await
+                .unwrap(),
+            Some(replay)
+        );
+        assert_eq!(
+            IncidentRepository::by_id(&repository, reviewed.id())
+                .await
+                .unwrap()
+                .unwrap()
+                .review_history()
+                .len(),
+            1
+        );
+        assert_eq!(
+            IncidentManagementStore::save_review(
+                &repository,
+                &reviewed,
+                next.version(),
+                42,
+                "review-1",
+                &ReviewReplay {
+                    fingerprint: "different".into(),
+                    result: ReviewResult {
+                        incident_id: reviewed.id(),
+                        version: reviewed.version(),
+                        state: reviewed.review_state(),
+                        actor_user_id: 42,
+                        note: "Checked".into(),
+                        updated_at: reviewed_at
+                    }
+                }
+            )
+            .await,
+            Err(IncidentStoreError::ConcurrentModification)
+        );
+        let filtered = IncidentManagementStore::list(
+            &repository,
+            reviewed.instance_id(),
+            &IncidentFilters {
+                operational_state: Some(IncidentOperationalState::Resolved),
+                review_state: Some(IncidentReviewState::Acknowledged),
+                opened_from: None,
+                opened_to: None,
+            },
+            None,
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id(), reviewed.id());
         database.drop().await.unwrap();
     }
 }

@@ -1,3 +1,4 @@
+use std::{collections::HashMap, sync::Mutex};
 use std::{future, future::Future, pin::Pin, sync::Arc};
 
 use axum::{
@@ -18,15 +19,22 @@ use crate::{
     },
     server_instances::{
         application::{
+            incident_management::{
+                IncidentFilters, IncidentListCursor, IncidentManagementService,
+                IncidentManagementStore, ManagementFuture, ReviewReplay,
+            },
+            incidents::IncidentStoreError,
             lifecycle_service::LifecycleOperationService,
             registry::InstanceRegistry,
             runtime_state::{RuntimeStateReader, RuntimeStateRepositoryError},
         },
         domain::{
-            InstanceCapabilities, InstanceCapability, InstanceClassification, InstanceEnvironment,
-            InstanceKind, InstanceManagement, InstanceObservability, InstanceReadiness,
-            InstanceRuntimeState, ProcessState, ReadinessStatus, ServerInstance, ServerInstanceId,
-            TerminationEvidence, TerminationKind,
+            Incident, IncidentConfidence, IncidentEvidence, IncidentFactId, IncidentId,
+            IncidentKind, IncidentReviewState, IncidentUnitName, InstanceCapabilities,
+            InstanceCapability, InstanceClassification, InstanceEnvironment, InstanceKind,
+            InstanceManagement, InstanceObservability, InstanceReadiness, InstanceRuntimeState,
+            ProcessState, ReadinessStatus, ServerInstance, ServerInstanceId, TerminationEvidence,
+            TerminationKind,
         },
         presentation::{router, state::ServerInstancesState},
     },
@@ -92,6 +100,7 @@ struct TestState {
     authenticator: Arc<dyn AuthenticateBearerToken>,
     registry: Arc<dyn InstanceRegistry>,
     states: Arc<dyn RuntimeStateReader>,
+    incident_service: Option<Arc<IncidentManagementService>>,
 }
 
 impl JwtExtractorState for TestState {
@@ -111,6 +120,12 @@ impl ServerInstancesState for TestState {
 
     fn lifecycle_operation_service(&self) -> Arc<LifecycleOperationService> {
         panic!("lifecycle endpoints use their dedicated application tests")
+    }
+    fn incident_management_service(&self) -> Arc<IncidentManagementService> {
+        self.incident_service
+            .as_ref()
+            .expect("incident test service")
+            .clone()
     }
 }
 
@@ -178,6 +193,7 @@ fn app_with_states(
             authenticator: Arc::new(Authenticator(principal)),
             registry: registry(),
             states,
+            incident_service: None,
         })
 }
 
@@ -202,6 +218,305 @@ fn state_request(instance_id: &str) -> Request<Body> {
 async fn json_body(response: Response) -> Value {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     serde_json::from_slice(&body).unwrap()
+}
+
+#[derive(Default)]
+struct IncidentMemory {
+    incidents: Mutex<Vec<Incident>>,
+    requests: Mutex<HashMap<(String, i64, String), ReviewReplay>>,
+}
+
+impl IncidentManagementStore for IncidentMemory {
+    fn list<'a>(
+        &'a self,
+        instance: &'a ServerInstanceId,
+        filters: &'a IncidentFilters,
+        cursor: Option<&'a IncidentListCursor>,
+        limit: usize,
+    ) -> ManagementFuture<'a, Vec<Incident>> {
+        Box::pin(async move {
+            let mut items: Vec<_> = self
+                .incidents
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|incident| {
+                    incident.instance_id() == instance
+                        && filters
+                            .operational_state
+                            .is_none_or(|state| incident.operational_state() == state)
+                        && filters
+                            .review_state
+                            .is_none_or(|state| incident.review_state() == state)
+                        && filters
+                            .opened_from
+                            .is_none_or(|from| incident.opened_at() >= from)
+                        && filters
+                            .opened_to
+                            .is_none_or(|to| incident.opened_at() <= to)
+                        && cursor.is_none_or(|cursor| {
+                            (
+                                incident.opened_at().timestamp_millis(),
+                                incident.id().to_string(),
+                            ) < (cursor.opened_at_millis, cursor.incident_id.clone())
+                        })
+                })
+                .cloned()
+                .collect();
+            items.sort_by(|a, b| {
+                (b.opened_at().timestamp_millis(), b.id().to_string())
+                    .cmp(&(a.opened_at().timestamp_millis(), a.id().to_string()))
+            });
+            items.truncate(limit);
+            Ok(items)
+        })
+    }
+    fn get<'a>(&'a self, id: IncidentId) -> ManagementFuture<'a, Option<Incident>> {
+        Box::pin(async move {
+            Ok(self
+                .incidents
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|item| item.id() == id)
+                .cloned())
+        })
+    }
+    fn by_review_key<'a>(
+        &'a self,
+        id: IncidentId,
+        actor: i64,
+        key: &'a str,
+    ) -> ManagementFuture<'a, Option<ReviewReplay>> {
+        Box::pin(async move {
+            Ok(self
+                .requests
+                .lock()
+                .unwrap()
+                .get(&(id.to_string(), actor, key.to_owned()))
+                .cloned())
+        })
+    }
+    fn save_review<'a>(
+        &'a self,
+        incident: &'a Incident,
+        expected: u64,
+        actor: i64,
+        key: &'a str,
+        replay: &'a ReviewReplay,
+    ) -> ManagementFuture<'a, ()> {
+        Box::pin(async move {
+            let mut all = self.incidents.lock().unwrap();
+            let stored = all
+                .iter_mut()
+                .find(|item| item.id() == incident.id())
+                .ok_or_else(|| IncidentStoreError::InvalidData("missing fixture".into()))?;
+            if stored.version() != expected {
+                return Err(IncidentStoreError::ConcurrentModification);
+            }
+            *stored = incident.clone();
+            self.requests.lock().unwrap().insert(
+                (incident.id().to_string(), actor, key.to_owned()),
+                replay.clone(),
+            );
+            Ok(())
+        })
+    }
+}
+
+fn incident_fixture(seconds: i64) -> Incident {
+    let at = chrono::DateTime::from_timestamp(1_700_000_000 + seconds, 0).unwrap();
+    let evidence = IncidentEvidence::new(
+        IncidentFactId::live(format!("fixture-{seconds}")).unwrap(),
+        IncidentUnitName::new("lara-game@dev-dm.service").unwrap(),
+        at,
+        ProcessState::Failed,
+        None,
+        None,
+        Some(TerminationEvidence::new(TerminationKind::ExitCode, Some(1))),
+        IncidentConfidence::Confirmed,
+    )
+    .unwrap();
+    Incident::open(
+        IncidentId::new(),
+        ServerInstanceId::new("dev-dm").unwrap(),
+        IncidentKind::Outage,
+        evidence,
+    )
+    .unwrap()
+}
+
+fn incident_app(role: UserRole, memory: Arc<IncidentMemory>) -> Router {
+    incident_app_with_permissions(role, vec![role], memory)
+}
+
+fn incident_app_with_permissions(
+    role: UserRole,
+    permissions: Vec<UserRole>,
+    memory: Arc<IncidentMemory>,
+) -> Router {
+    let registry = registry();
+    let service = Arc::new(IncidentManagementService::new(registry.clone(), memory));
+    Router::new()
+        .merge(router::<TestState>())
+        .with_state(TestState {
+            authenticator: Arc::new(Authenticator(Ok(principal(role, permissions)))),
+            registry,
+            states: Arc::new(EmptyStates),
+            incident_service: Some(service),
+        })
+}
+
+fn incident_request(method: &str, uri: &str) -> axum::http::request::Builder {
+    Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, "Bearer signed.jwt")
+}
+
+#[tokio::test]
+async fn incident_http_hides_auxiliary_and_paginates_for_developer() {
+    let memory = Arc::new(IncidentMemory::default());
+    let first = incident_fixture(1);
+    let second = incident_fixture(2);
+    memory.incidents.lock().unwrap().extend([first, second]);
+    let uri = "/server-instances/dev-dm/incidents?limit=1";
+    for role in [UserRole::Admin, UserRole::Challenger] {
+        let response = incident_app(role, memory.clone())
+            .oneshot(incident_request("GET", uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        let primary = incident_app(role, memory.clone())
+            .oneshot(
+                incident_request("GET", "/server-instances/main/incidents")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(primary.status(), StatusCode::FORBIDDEN);
+    }
+    let response = incident_app(UserRole::Developer, memory.clone())
+        .oneshot(incident_request("GET", uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let explicit_developer = incident_app_with_permissions(
+        UserRole::Admin,
+        vec![UserRole::Admin, UserRole::Developer],
+        memory.clone(),
+    )
+    .oneshot(incident_request("GET", uri).body(Body::empty()).unwrap())
+    .await
+    .unwrap();
+    assert_eq!(explicit_developer.status(), StatusCode::OK);
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let page = json_body(response).await;
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    let cursor = page["nextCursor"].as_str().unwrap();
+    let next = incident_app(UserRole::Developer, memory.clone())
+        .oneshot(
+            incident_request("GET", &format!("{uri}&cursor={cursor}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let next_page = json_body(next).await;
+    assert_eq!(next_page["items"].as_array().unwrap().len(), 1);
+    assert_ne!(
+        page["items"][0]["incidentId"],
+        next_page["items"][0]["incidentId"]
+    );
+    assert!(next_page["nextCursor"].is_null());
+    let mismatched = incident_app(UserRole::Developer, memory)
+        .oneshot(
+            incident_request(
+                "GET",
+                &format!("{uri}&reviewState=unreviewed&cursor={cursor}"),
+            )
+            .body(Body::empty())
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(mismatched.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn incident_review_requires_etag_and_replays_same_request() {
+    let memory = Arc::new(IncidentMemory::default());
+    let incident = incident_fixture(1);
+    let uri = format!(
+        "/server-instances/dev-dm/incidents/{}/review",
+        incident.id()
+    );
+    memory.incidents.lock().unwrap().push(incident);
+    let request = |key: &str, version: Option<&str>, note: &str| {
+        let mut builder = incident_request("PATCH", &uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header("idempotency-key", key);
+        if let Some(version) = version {
+            builder = builder.header(header::IF_MATCH, version);
+        }
+        builder
+            .body(Body::from(format!(
+                r#"{{"reviewState":"acknowledged","note":"{note}"}}"#
+            )))
+            .unwrap()
+    };
+    let app = || incident_app(UserRole::Developer, memory.clone());
+    assert_eq!(
+        app()
+            .oneshot(request("one", None, "checked"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PRECONDITION_REQUIRED
+    );
+    let first = app()
+        .oneshot(request("one", Some("\"0\""), "checked"))
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+    assert_eq!(first.headers()[header::ETAG], "\"1\"");
+    let first_body = json_body(first).await;
+    let replay = app()
+        .oneshot(request("one", Some("\"0\""), "checked"))
+        .await
+        .unwrap();
+    assert_eq!(replay.status(), StatusCode::OK);
+    assert_eq!(json_body(replay).await, first_body);
+    assert_eq!(
+        app()
+            .oneshot(request("one", Some("\"0\""), "different"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        app()
+            .oneshot(request("two", Some("\"0\""), "checked"))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::PRECONDITION_FAILED
+    );
+    assert_eq!(
+        memory.incidents.lock().unwrap()[0].review_state(),
+        IncidentReviewState::Acknowledged
+    );
+    assert_eq!(
+        memory.incidents.lock().unwrap()[0].review_history().len(),
+        1
+    );
+    let hidden = incident_app(UserRole::Admin, memory)
+        .oneshot(request("three", None, "checked"))
+        .await
+        .unwrap();
+    assert_eq!(hidden.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
@@ -247,10 +562,13 @@ async fn developer_receives_all_instances_without_internal_runtime_configuration
         body["instances"][1]["features"]["lara.lifecycle.v1"]["permissions"],
         serde_json::json!(["read", "start", "stop", "restart"])
     );
-    assert!(body["instances"][1]["features"]["lara.incidents.v1"].is_null());
+    assert_eq!(
+        body["instances"][1]["features"]["lara.incidents.v1"]["permissions"],
+        serde_json::json!(["read", "acknowledge"])
+    );
     assert_eq!(
         body["instances"][1]["observability"]["incidentTracking"],
-        false
+        true
     );
     for forbidden in ["systemdUnit", "storageRoot", "udsPath"] {
         assert!(!body.to_string().contains(forbidden), "exposed {forbidden}");

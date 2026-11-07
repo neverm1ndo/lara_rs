@@ -159,6 +159,9 @@ capability manifest служит навигации.
    API включить соответствующие actions в manifest; инциденты auxiliary
    не должны быть видны Admin и Challenger. Результат: история после
    переподключения читается по стабильному cursor без пропусков и дублей.
+   Маршруты, Developer-only проверки, cursor pagination, strong ETag и
+   атомарный review с идемпотентным ответом подключены. Manifest открывает
+   `lara.incidents.v1` только systemd-managed инстансам с tracking.
 
 7. **Realtime.** Публиковать изменение инцидента из durable outbox в
    существующую Socket.IO инфраструктуру. Payload содержит event ID,

@@ -82,6 +82,7 @@ use crate::{
     server_instances::{
         self,
         application::{
+            incident_management::{IncidentManagementService, IncidentManagementStore},
             incident_service::{
                 IncidentObservation, IncidentObservationService, IncidentOperationLookup,
             },
@@ -314,6 +315,11 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
     ));
     let registry_port: Arc<dyn InstanceRegistry> = instance_registry.clone();
     let incident_repository: Arc<dyn IncidentRepository> = incidents.clone();
+    let incident_management_store: Arc<dyn IncidentManagementStore> = incidents.clone();
+    let incident_management_service = Arc::new(IncidentManagementService::new(
+        registry_port.clone(),
+        incident_management_store,
+    ));
     let incident_checkpoints: Arc<dyn IncidentCheckpointRepository> = incidents;
     let journal_reader: Arc<dyn JournalReader> = Arc::new(SystemJournalReader);
     let incident_replay: Arc<dyn IncidentReplay> = Arc::new(JournalReplayService::new(
@@ -576,6 +582,7 @@ async fn build_application(config: AppConfig) -> Result<BuiltApplication, Bootst
         registry_port,
         runtime_state_reader,
         lifecycle_operation_service,
+        incident_management_service,
         configurator_directory,
         configuration_file_service,
         configuration_target_resolver,
@@ -715,6 +722,10 @@ mod tests {
         }
 
         fn lifecycle_operation_service(&self) -> Arc<LifecycleOperationService> {
+            panic!("documentation generation does not resolve application services")
+        }
+
+        fn incident_management_service(&self) -> Arc<IncidentManagementService> {
             panic!("documentation generation does not resolve application services")
         }
     }

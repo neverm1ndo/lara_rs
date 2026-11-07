@@ -1,3 +1,4 @@
+pub mod incident_management;
 pub mod incident_service;
 pub mod incidents;
 pub mod journal_replay;
