@@ -188,7 +188,11 @@ fn single_header<'a>(
 }
 
 fn parse_etag(value: &str) -> Result<u64, IncidentHttpError> {
-    if value.starts_with("W/") || !value.starts_with('"') || !value.ends_with('"') {
+    if value.len() < 3
+        || value.starts_with("W/")
+        || !value.starts_with('"')
+        || !value.ends_with('"')
+    {
         return Err(IncidentHttpError::BadRequest);
     }
     let version = value[1..value.len() - 1]
@@ -249,5 +253,21 @@ impl IntoResponse for IncidentHttpError {
             Self::Unavailable => (StatusCode::SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE"),
         };
         no_store((status, Json(IncidentErrorResponse { code })).into_response())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn if_match_requires_canonical_strong_version() {
+        assert_eq!(parse_etag("\"12\"").unwrap(), 12);
+        for value in ["\"", "\"\"", "\"012\"", "W/\"12\"", "*", "12"] {
+            assert!(matches!(
+                parse_etag(value),
+                Err(IncidentHttpError::BadRequest)
+            ));
+        }
     }
 }
