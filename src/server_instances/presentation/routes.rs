@@ -1,6 +1,6 @@
 use utoipa_axum::{router::OpenApiRouter, routes};
 
-use super::{handlers, state::ServerInstancesState};
+use super::{handlers, incident_handlers, state::ServerInstancesState};
 
 /// This domain owns a root-level collection route, so the router is merged
 /// directly into the application's root router rather than nested.
@@ -14,4 +14,7 @@ where
         .routes(routes!(handlers::create_lifecycle_operation))
         .routes(routes!(handlers::list_lifecycle_operations))
         .routes(routes!(handlers::get_lifecycle_operation))
+        .routes(routes!(incident_handlers::list_incidents))
+        .routes(routes!(incident_handlers::get_incident))
+        .routes(routes!(incident_handlers::change_review))
 }

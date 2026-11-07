@@ -24,6 +24,7 @@ use crate::{
     },
     maps::{application::file_service::MapsFileService, presentation::state::MapsState},
     server_instances::application::{
+        incident_management::IncidentManagementService,
         lifecycle_service::LifecycleOperationService, registry::InstanceRegistry,
         runtime_state::RuntimeStateReader,
     },
@@ -41,6 +42,7 @@ pub struct AppState {
     instance_registry: Arc<dyn InstanceRegistry>,
     runtime_state_reader: Arc<dyn RuntimeStateReader>,
     lifecycle_operation_service: Arc<LifecycleOperationService>,
+    incident_management_service: Arc<IncidentManagementService>,
     configurator_directory: RelativeStoragePath,
     configuration_file_service: Arc<dyn ConfigurationFileService>,
     configuration_target_resolver: Arc<dyn ConfigurationTargetResolver>,
@@ -64,6 +66,7 @@ impl AppState {
         instance_registry: Arc<dyn InstanceRegistry>,
         runtime_state_reader: Arc<dyn RuntimeStateReader>,
         lifecycle_operation_service: Arc<LifecycleOperationService>,
+        incident_management_service: Arc<IncidentManagementService>,
         configurator_directory: RelativeStoragePath,
         configuration_file_service: impl ConfigurationFileService + 'static,
         configuration_target_resolver: Arc<dyn ConfigurationTargetResolver>,
@@ -84,6 +87,7 @@ impl AppState {
             instance_registry,
             runtime_state_reader,
             lifecycle_operation_service,
+            incident_management_service,
             configurator_directory,
             configuration_file_service: Arc::new(configuration_file_service),
             configuration_target_resolver,
@@ -125,6 +129,10 @@ impl ServerInstancesState for AppState {
 
     fn lifecycle_operation_service(&self) -> Arc<LifecycleOperationService> {
         Arc::clone(&self.lifecycle_operation_service)
+    }
+
+    fn incident_management_service(&self) -> Arc<IncidentManagementService> {
+        Arc::clone(&self.incident_management_service)
     }
 }
 

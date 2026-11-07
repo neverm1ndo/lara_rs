@@ -1,3 +1,11 @@
+lara-rs (0.2.5-1) unstable; urgency=medium
+
+  * Add auxiliary incident tracking, journald replay, and durable review API.
+  * Deliver incident updates through the realtime outbox.
+  * Extend doctor diagnostics and document the proposed primary UDS contract.
+
+ -- neverm1ndo <it@nmnd.ru>  Sat, 07 Nov 2026 04:09:17 +0300
+
 lara-rs (0.2.4-1) unstable; urgency=medium
 
   * Add instance-scoped configuration routes and per-instance file policies.

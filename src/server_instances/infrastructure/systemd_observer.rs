@@ -9,6 +9,8 @@ use zbus::{Connection, Proxy, zvariant::OwnedObjectPath};
 
 use crate::server_instances::{
     application::{
+        incident_service::IncidentObservation,
+        journal_replay::IncidentReplay,
         lifecycle_events::{
             LifecycleEventDelivery, ServerInstanceEvent, ServerInstanceStateChangedEvent,
         },
@@ -34,6 +36,7 @@ pub struct SystemdObservationTarget {
     instance_id: ServerInstanceId,
     unit_name: String,
     readiness_mode: InstanceReadiness,
+    incident_tracking: bool,
 }
 
 impl SystemdObservationTarget {
@@ -46,7 +49,13 @@ impl SystemdObservationTarget {
             instance_id,
             unit_name: unit_name.into(),
             readiness_mode,
+            incident_tracking: false,
         }
+    }
+
+    pub fn with_incident_tracking(mut self, enabled: bool) -> Self {
+        self.incident_tracking = enabled;
+        self
     }
 }
 
@@ -54,6 +63,8 @@ pub struct SystemdObserverWorker {
     targets: Vec<SystemdObservationTarget>,
     states: Arc<dyn RuntimeStateWriter>,
     events: Option<Arc<dyn LifecycleEventDelivery>>,
+    incidents: Option<Arc<dyn IncidentObservation>>,
+    replay: Option<Arc<dyn IncidentReplay>>,
 }
 
 impl SystemdObserverWorker {
@@ -65,11 +76,23 @@ impl SystemdObserverWorker {
             targets,
             states,
             events: None,
+            incidents: None,
+            replay: None,
         }
     }
 
     pub fn with_event_delivery(mut self, events: Arc<dyn LifecycleEventDelivery>) -> Self {
         self.events = Some(events);
+        self
+    }
+
+    pub fn with_incident_observation(mut self, incidents: Arc<dyn IncidentObservation>) -> Self {
+        self.incidents = Some(incidents);
+        self
+    }
+
+    pub fn with_journal_replay(mut self, replay: Arc<dyn IncidentReplay>) -> Self {
+        self.replay = Some(replay);
         self
     }
 
@@ -86,9 +109,11 @@ impl SystemdObserverWorker {
         for target in self.targets {
             let states = Arc::clone(&self.states);
             let events = self.events.clone();
+            let incidents = self.incidents.clone();
+            let replay = self.replay.clone();
             let target_shutdown = shutdown.clone();
             tasks.spawn(async move {
-                observe_target(target, states, events, target_shutdown).await;
+                observe_target(target, states, events, incidents, replay, target_shutdown).await;
             });
         }
 
@@ -108,9 +133,11 @@ async fn observe_target(
     target: SystemdObservationTarget,
     states: Arc<dyn RuntimeStateWriter>,
     events: Option<Arc<dyn LifecycleEventDelivery>>,
+    incidents: Option<Arc<dyn IncidentObservation>>,
+    replay: Option<Arc<dyn IncidentReplay>>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let mut last_state: Option<InstanceRuntimeState> = None;
+    let mut memory = ObservationMemory::default();
 
     loop {
         if *shutdown.borrow() {
@@ -121,14 +148,19 @@ async fn observe_target(
             &target,
             &states,
             events.as_ref(),
+            incidents.as_ref(),
+            replay.as_ref(),
             &mut shutdown,
-            &mut last_state,
+            &mut memory,
         )
         .await;
         match result {
             Ok(()) => return,
             Err(error) => {
-                if let Some(state) = last_state.clone() {
+                // A reconnect is not continuous evidence. Journald replay will
+                // account for the missing interval in the next release step.
+                memory.incident = None;
+                if let Some(state) = memory.published.clone() {
                     let stale = state.into_stale();
                     if let Err(store_error) = states.put(stale.clone()) {
                         warn!(
@@ -137,6 +169,7 @@ async fn observe_target(
                             "failed to mark systemd snapshot as stale"
                         );
                     } else {
+                        memory.published = Some(stale.clone());
                         publish_state_event(events.as_ref(), &target, stale).await;
                     }
                 }
@@ -156,12 +189,20 @@ async fn observe_target(
     }
 }
 
+#[derive(Default)]
+struct ObservationMemory {
+    published: Option<InstanceRuntimeState>,
+    incident: Option<InstanceRuntimeState>,
+}
+
 async fn observe_connected(
     target: &SystemdObservationTarget,
     states: &Arc<dyn RuntimeStateWriter>,
     events: Option<&Arc<dyn LifecycleEventDelivery>>,
+    incidents: Option<&Arc<dyn IncidentObservation>>,
+    replay: Option<&Arc<dyn IncidentReplay>>,
     shutdown: &mut watch::Receiver<bool>,
-    last_state: &mut Option<InstanceRuntimeState>,
+    memory: &mut ObservationMemory,
 ) -> Result<(), SystemdObserverError> {
     let connection = Connection::system().await?;
     let manager = Proxy::new(
@@ -184,7 +225,17 @@ async fn observe_connected(
     .await?;
     let mut changes = properties.receive_signal("PropertiesChanged").await?;
 
-    refresh(&connection, &path, target, states, events, last_state).await?;
+    refresh(
+        &connection,
+        &path,
+        target,
+        states,
+        events,
+        incidents,
+        replay,
+        memory,
+    )
+    .await?;
     let mut reconciliation = tokio::time::interval(RECONCILE_INTERVAL);
     reconciliation.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     reconciliation.tick().await;
@@ -196,22 +247,25 @@ async fn observe_connected(
                 if change.is_none() {
                     return Err(SystemdObserverError::SignalStreamEnded);
                 }
-                refresh(&connection, &path, target, states, events, last_state).await?;
+                refresh(&connection, &path, target, states, events, incidents, replay, memory).await?;
             }
             _ = reconciliation.tick() => {
-                refresh(&connection, &path, target, states, events, last_state).await?;
+                refresh(&connection, &path, target, states, events, incidents, replay, memory).await?;
             }
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn refresh(
     connection: &Connection,
     path: &OwnedObjectPath,
     target: &SystemdObservationTarget,
     states: &Arc<dyn RuntimeStateWriter>,
     events: Option<&Arc<dyn LifecycleEventDelivery>>,
-    last_state: &mut Option<InstanceRuntimeState>,
+    incidents: Option<&Arc<dyn IncidentObservation>>,
+    replay: Option<&Arc<dyn IncidentReplay>>,
+    memory: &mut ObservationMemory,
 ) -> Result<(), SystemdObserverError> {
     let observation = read_unit(connection, path).await?;
     debug!(
@@ -224,13 +278,51 @@ async fn refresh(
     );
     let state = observation.normalize(target, Utc::now());
     states.put(state.clone())?;
-    if last_state
+    let mut replay_failed = false;
+    let journal_available = if target.incident_tracking {
+        if let Some(replay) = replay {
+            match replay.replay(&target.instance_id, &target.unit_name).await {
+                Ok(available) => available,
+                Err(error) => {
+                    warn!(instance_id = %target.instance_id, %error, "failed to persist journal replay");
+                    replay_failed = true;
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if journal_available {
+        memory.incident = Some(state.clone());
+    }
+    if target.incident_tracking
+        && !journal_available
+        && !replay_failed
+        && let Some(incidents) = incidents
+    {
+        match incidents
+            .observe(&target.unit_name, memory.incident.as_ref(), &state)
+            .await
+        {
+            Ok(()) => memory.incident = Some(state.clone()),
+            Err(error) => warn!(
+                instance_id = %target.instance_id,
+                %error,
+                "failed to persist incident observation; retaining prior boundary for retry"
+            ),
+        }
+    }
+    if memory
+        .published
         .as_ref()
         .is_none_or(|previous| runtime_state_changed(previous, &state))
     {
         publish_state_event(events, target, state.clone()).await;
     }
-    *last_state = Some(state);
+    memory.published = Some(state);
     Ok(())
 }
 

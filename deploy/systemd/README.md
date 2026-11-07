@@ -7,6 +7,14 @@
 
 ## Установка Debian-пакета Lara
 
+Для восстановления инцидентов после простоя Lara нужен persistent journald
+(`Storage=persistent` в `journald.conf` либо каталог `/var/log/journal`) и
+доступ сервисной учётной записи к системному журналу. Пакетный
+`lara-rs.service` добавляет `systemd-journal` в `SupplementaryGroups`.
+После изменения настроек перезапустите journald и Lara. При отсутствии
+журнала, прав или сохранённого cursor Lara пишет диагностическую запись в
+`server_instance_incident_gaps`; неизвестный интервал не становится инцидентом.
+
 Release artifact рассчитан на Debian 12 (`amd64`). Пакет устанавливает бинарник,
 `lara-rs.service`, шаблон `lara-game@.service`, минимальное polkit-правило,
 примеры конфигурации и утилиты `/usr/lib/lara-rs/verify-pilot` и
@@ -29,7 +37,7 @@ lara completions bash | sudo tee /usr/share/bash-completion/completions/lara >/d
 пишет скрипт в stdout и не читает production-конфигурацию.
 
 ```sh
-sudo apt install ./lara-rs_0.2.4-1_amd64.deb
+sudo apt install ./lara-rs_0.2.5-1_amd64.deb
 
 sudo lara config init --dry-run
 sudo lara config init
@@ -421,3 +429,47 @@ MongoDB recovery и outbox leases проверяются тестом
 `cargo test --locked mongo_indexes_recovery_and_outbox_leases -- --ignored --nocapture`
 при заданном `LARA_TEST_MONGODB_URI`. Тест создаёт базу со случайным именем и
 удаляет её после успешного завершения; используйте отдельный тестовый MongoDB.
+
+## Release E: persistent journal и восстановление инцидентов
+
+Включите persistent journald **до** испытаний с аварийным завершением. В
+`/etc/systemd/journald.conf` задайте `Storage=persistent`, создайте
+`/var/log/journal` при необходимости и перезапустите `systemd-journald`.
+Проверьте `journalctl --disk-usage` и наличие файлов в `/var/log/journal`.
+`lara-rs.service` должен запускаться с дополнительной группой
+`systemd-journal`; после обновления пакета выполните `systemctl daemon-reload`
+и перезапустите Lara, чтобы группа попала в работающий процесс.
+
+```sh
+sudo lara doctor --instance test
+sudo systemctl show lara-rs.service -p User -p SupplementaryGroups
+sudo journalctl -u lara-game@test.service --no-pager -n 50
+```
+
+`doctor` проверяет группу **работающего** процесса Lara, читает checkpoint и
+последний gap из MongoDB, а также открывает journal и проверяет, сохранился ли
+checkpoint cursor. Проверка journal выполняется с правами запустившего
+`doctor` пользователя; запуск от root сам по себе не доказывает доступ Lara.
+Группа процесса подтверждает необходимую часть прав, но не заменяет пробу
+чтения под сервисной учётной записью. Отсутствие checkpoint до первого
+подходящего сообщения systemd даёт `WARN`; это допустимо для нового инстанса.
+Исторический gap остаётся `WARN` и после возобновления replay, поскольку
+неизвестный промежуток требует аудита.
+
+При `FAIL instance.<id>.journal.replay` проверьте настройку persistent journal,
+права сервиса, доступность MongoDB и сообщения Lara через
+`journalctl -u lara-rs.service`. При `cursor is no longer present` записи могли
+быть удалены ротацией: автоматический replay не может восстановить этот
+интервал. Найдите причину в MongoDB
+`server_instance_incident_gaps` (`instance_id`, `reason`, `detected_at`,
+`previous_cursor`), сопоставьте с systemd journal и отметьте результат
+разбора инцидентов вручную. `doctor` не изменяет checkpoint, журнал или
+историю инцидентов.
+
+Для отката Release E остановите Lara, установите прежний пакет и запустите
+службу снова. Сохраните коллекции `server_instance_incidents`,
+`server_instance_incident_checkpoints` и `server_instance_incident_gaps`:
+пакетный откат не должен удалять MongoDB историю. Перед повторным включением
+Release E проверьте `lara doctor --instance <id>`; если checkpoint cursor уже
+удалён, изучите зафиксированный gap и неизвестный интервал до заключения об
+аптайме. Игровые unit и их файлы при откате Lara не меняются.
